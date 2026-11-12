@@ -45,14 +45,15 @@ function boot(user) {
   const person = user.role === 'candidate' ? user.candidate : user.employer;
   $('user-box').innerHTML = `${avatarHTML(person || {}, 'small')} <span>${esc(user.name || user.email)} · ${esc(user.role)}</span> <button onclick="doLogout()">Log out</button>`;
   const nav = user.role === 'candidate'
-    ? `<button onclick="showView('discovery')">🔥 For You</button><button onclick="showView('applications')">My Applications</button><button onclick="showView('documents')">Documents &amp; Master Resume</button><button onclick="showView('profile')">Profile</button><button onclick="showView('matches')">Matches ❤️</button>`
-    : `<button onclick="showView('employer')">Employer Dashboard</button><button onclick="showView('matches')">Matches ❤️</button>`;
+    ? `<button data-view="discovery" onclick="showView('discovery')"><span class="nav-ic">🔥</span><span>For You</span></button><button data-view="applications" onclick="showView('applications')"><span class="nav-ic">📨</span><span>Applications</span></button><button data-view="documents" onclick="showView('documents')"><span class="nav-ic">🗂️</span><span>Documents</span></button><button data-view="profile" onclick="showView('profile')"><span class="nav-ic">👤</span><span>Profile</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`
+    : `<button data-view="employer" onclick="showView('employer')"><span class="nav-ic">🔥</span><span>Employer</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`;
   $('main-nav').innerHTML = nav;
   showView(user.role === 'candidate' ? 'discovery' : 'employer');
 }
 function showView(v) {
   document.querySelectorAll('.view').forEach(e => e.classList.add('hidden'));
   $('view-' + v).classList.remove('hidden');
+  document.querySelectorAll('#main-nav button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   if (v === 'discovery') loadDeck();
   if (v === 'applications') loadApps();
   if (v === 'documents') loadDocuments();
@@ -63,26 +64,53 @@ function showView(v) {
 
 // ---------- candidate discovery ----------
 function whyHTML(j) { return `<div class="why"><b>Why this job</b><ul>${(j.why || []).map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>`; }
+function badgesHTML(scoreLabel, feedScore, isStretch) {
+  return `<div class="hero-badges"><span class="score-pill">${scoreLabel}</span><span class="feed-pill">For You ${feedScore}</span>${isStretch ? '<span class="stretch-pill">Stretch pick</span>' : ''}</div>`;
+}
 function cardHTML(j) {
-  return `<div class="card" id="top-card"><div class="badges"><span class="score">${j.score}% match</span><span class="feed">For You ${j.feed_score}</span>${j.is_stretch ? '<span class="stretch">Stretch pick</span>' : ''}<span class="meta">Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></div><h2>${esc(j.title)}</h2><p><b>${esc(j.company)}</b> · ${esc(j.location || '')} ${j.remote ? '· Remote' : ''}</p><p>${esc(j.salary_text || '')}</p><p>${esc((j.description || '').slice(0, 400))}</p><div>${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div>`;
+  const initial = esc((j.company || '?').trim().charAt(0).toUpperCase() || '?');
+  return `<div class="card job-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero"><div class="segments"><i></i></div>${badgesHTML(j.score + '% match', j.feed_score, j.is_stretch)}<div class="hero-center"><span class="hero-initial">${initial}</span></div><div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div><div class="card-body"><p class="meta-line"><span>📍 ${esc(j.location || 'Unspecified')}${j.remote ? ' · Remote' : ''}</span>${j.salary_text ? `<span class="salary">${esc(j.salary_text)}</span>` : ''}<span>Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></p><p class="desc">${esc((j.description || '').slice(0, 400))}</p><div class="chips">${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a class="apply-link" href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div></div>`;
+}
+function peekHTML(j) {
+  if (!j) return '';
+  const initial = esc((j.company || '?').trim().charAt(0).toUpperCase() || '?');
+  return `<div class="card peek" aria-hidden="true"><div class="card-hero"><div class="hero-center"><span class="hero-initial">${initial}</span></div><div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div></div>`;
 }
 async function loadDeck() { const r = await api('/api/discovery'); deck = r.json || []; $('pool-count').textContent = deck.length + ' jobs in your feed'; renderDeck(); }
-function renderDeck() { $('deck').innerHTML = deck.length ? cardHTML(deck[0]) : '<div class="card"><h2>No more jobs 🎉</h2><p>Rescan the boards or check back later.</p></div>'; attachDrag('top-card', swipeCurrent); }
+function renderDeck() { $('deck').innerHTML = deck.length ? peekHTML(deck[1]) + cardHTML(deck[0]) : '<div class="card"><h2>No more jobs 🎉</h2><p>Rescan the boards or check back later.</p></div>'; attachDrag('top-card', swipeCurrent); }
 async function rescan() { $('scan-result').textContent = 'Scanning…'; const r = await POST('/api/jobs/scan'); const rep = r.json || {}; $('scan-result').textContent = Object.entries(rep).filter(([k, v]) => v && typeof v === 'object').map(([k, v]) => `${k}: +${v.new} new (${v.status})`).join(' · ') + (rep.pool_total ? ` · Pool total: ${rep.pool_total}` : ''); loadDeck(); }
 async function swipeCurrent(dir) {
   if (!deck.length) return;
   const j = deck[0];
   const r = await POST('/api/swipe', { job_id: j.id, direction: dir });
   deck.shift();
-  if (r.json && r.json.match) alert("It's a MATCH! ❤️ Check Matches.");
+  if (r.json && r.json.match) showMatch({ name: j.title, sub: j.company, otherInitial: (j.company || '?').charAt(0).toUpperCase(), otherPhoto: '' });
   else if (dir === 'right' && r.json && r.json.application) alert('Application: ' + r.json.application.status + ' (' + r.json.application.method + ') — with a tailored resume built from your Master Profile facts only. Gaps are listed, never invented.');
   renderDeck();
+}
+
+// ---------- match overlay ----------
+function matchAvatarHTML(photo, initial) {
+  return photo ? `<img class="match-avatar" src="${esc(photo)}" alt="">` : `<span class="match-avatar">${esc(initial || '?')}</span>`;
+}
+function showMatch(opts) {
+  const person = ME ? (ME.candidate || ME.employer || {}) : {};
+  const myPhoto = person.photo_url || person.logo_url || '';
+  const myInitial = ((ME && (ME.name || ME.email)) || '?').charAt(0).toUpperCase();
+  $('match-title').textContent = opts.name || '';
+  $('match-sub').textContent = opts.sub || '';
+  $('match-avatars').innerHTML = matchAvatarHTML(myPhoto, myInitial) + matchAvatarHTML(opts.otherPhoto || '', opts.otherInitial || '?');
+  $('match-overlay').classList.remove('hidden');
+}
+function closeMatch(goMatches) {
+  $('match-overlay').classList.add('hidden');
+  if (goMatches) showView('matches');
 }
 
 // ---------- applications ----------
 async function loadApps() {
   const apps = await apiJ('/api/applications') || [];
-  $('apps').innerHTML = apps.length ? apps.map(a => `<div class="row"><div><b>${esc(a.title)}</b> @ ${esc(a.company)}<br><span class="meta">${esc(a.status)} · ${esc(a.method)} · ${esc(a.created_at || '')} ${a.tailored ? '<span class="stretch">Tailored for this job</span>' : ''}</span><br><span class="meta">${esc(a.proof || '')}</span>${a.coverage && (a.coverage.missing || []).length ? `<br><span class="meta">Keyword gaps (left out, never invented): ${esc((a.coverage.missing || []).join(', '))}</span>` : ''}</div>${a.has_tailored ? `<button onclick="viewTailored(${a.id})">View tailored resume</button>` : ''}</div>`).join('') : '<p>No applications yet — swipe right on a job.</p>';
+  $('apps').innerHTML = apps.length ? apps.map(a => `<div class="row"><div><b>${esc(a.title)}</b> @ ${esc(a.company)}<br><span class="meta">${esc(a.status)} · ${esc(a.method)} · ${esc(a.created_at || '')} ${a.tailored ? '<span class="stretch-pill">Tailored for this job</span>' : ''}</span><br><span class="meta">${esc(a.proof || '')}</span>${a.coverage && (a.coverage.missing || []).length ? `<br><span class="meta">Keyword gaps (left out, never invented): ${esc((a.coverage.missing || []).join(', '))}</span>` : ''}</div>${a.has_tailored ? `<button onclick="viewTailored(${a.id})">View tailored resume</button>` : ''}</div>`).join('') : '<p>No applications yet — swipe right on a job.</p>';
 }
 async function viewTailored(aid) {
   const t = await apiJ('/api/applications/' + aid + '/tailored-resume');
@@ -159,13 +187,23 @@ async function postJob() {
   loadEmployer();
 }
 function empCardHTML(c, job) {
-  return `<div class="card" id="emp-top-card"><div class="badges"><span class="score">${c.score}% fit</span><span class="feed">For You ${c.feed_score}</span></div><div class="profile-head">${avatarHTML(c, 'large')}<div><h2>${esc(c.name)}</h2><p><b>${esc(c.title || '')}</b> · ${c.years_exp || 0} yrs</p></div></div><p>${esc(c.summary || '')}</p><div>${(c.skills || []).map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div><div class="why"><b>Why this candidate</b><ul>${(c.why || []).map(w => `<li>${esc(w)}</li>`).join('')}</ul></div></div>`;
+  const hero = c.photo_url
+    ? `<div class="card-hero photo"><img class="hero-img" src="${esc(c.photo_url)}" alt=""><div class="segments"><i></i></div>${badgesHTML(c.score + '% fit', c.feed_score, false)}<div class="hero-scrim"><h2>${esc(c.name)}</h2><p class="hero-sub">${esc(c.title || '')} · ${c.years_exp || 0} yrs</p></div></div>`
+    : `<div class="card-hero"><div class="segments"><i></i></div>${badgesHTML(c.score + '% fit', c.feed_score, false)}<div class="hero-center"><span class="hero-initial">${esc(initials(c.name || '?'))}</span></div><div class="hero-scrim"><h2>${esc(c.name)}</h2><p class="hero-sub">${esc(c.title || '')} · ${c.years_exp || 0} yrs</p></div></div>`;
+  return `<div class="card cand-card" id="emp-top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div>${hero}<div class="card-body"><p class="desc">${esc(c.summary || '')}</p><div class="chips">${(c.skills || []).map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div><div class="why"><b>Why this candidate</b><ul>${(c.why || []).map(w => `<li>${esc(w)}</li>`).join('')}</ul></div></div></div>`;
+}
+function empPeekHTML(c) {
+  if (!c) return '';
+  const hero = c.photo_url
+    ? `<div class="card-hero photo"><img class="hero-img" src="${esc(c.photo_url)}" alt=""><div class="hero-scrim"><h2>${esc(c.name)}</h2></div></div>`
+    : `<div class="card-hero"><div class="hero-center"><span class="hero-initial">${esc(initials(c.name || '?'))}</span></div><div class="hero-scrim"><h2>${esc(c.name)}</h2></div></div>`;
+  return `<div class="card peek" aria-hidden="true">${hero}</div>`;
 }
 async function loadEmpDeck() {
   const sel = $('emp-job-select').value;
   const data = await apiJ('/api/employer/candidates' + (sel ? '?job_id=' + sel : '')) || {};
   empJob = data.job; empDeck = data.candidates || [];
-  $('emp-deck').innerHTML = empDeck.length && empJob ? empCardHTML(empDeck[0], empJob) : '<div class="card"><h2>No more candidates 🎉</h2><p>Post a job first if you have none.</p></div>';
+  $('emp-deck').innerHTML = empDeck.length && empJob ? empPeekHTML(empDeck[1]) + empCardHTML(empDeck[0], empJob) : '<div class="card"><h2>No more candidates 🎉</h2><p>Post a job first if you have none.</p></div>';
   attachDrag('emp-top-card', empSwipe);
 }
 async function empSwipe(dir) {
@@ -173,11 +211,11 @@ async function empSwipe(dir) {
   const c = empDeck[0];
   const r = await POST('/api/employer/swipe', { job_id: empJob.id, candidate_id: c.id, direction: dir });
   empDeck.shift();
-  if (r.json && r.json.match) alert("It's a MATCH! ❤️ Check Matches.");
+  if (r.json && r.json.match) showMatch({ name: c.name, sub: empJob.title + ' @ ' + (empJob.company || ''), otherPhoto: c.photo_url || '', otherInitial: (c.name || '?').charAt(0).toUpperCase() });
   loadEmpDeckRender();
 }
 function loadEmpDeckRender() {
-  $('emp-deck').innerHTML = empDeck.length && empJob ? empCardHTML(empDeck[0], empJob) : '<div class="card"><h2>No more candidates 🎉</h2></div>';
+  $('emp-deck').innerHTML = empDeck.length && empJob ? empPeekHTML(empDeck[1]) + empCardHTML(empDeck[0], empJob) : '<div class="card"><h2>No more candidates 🎉</h2></div>';
   attachDrag('emp-top-card', empSwipe);
 }
 async function uploadLogo() {
@@ -200,9 +238,11 @@ async function sendMsg(mid) { const v = $('msg-' + mid).value; if (!v) return; a
 function attachDrag(elId, onSwipe) {
   const el = $(elId); if (!el) return;
   let sx = 0, dx = 0;
+  const like = el.querySelector('.stamp-like'), nope = el.querySelector('.stamp-nope');
+  const stamps = () => { if (like) like.style.opacity = dx > 8 ? Math.min(dx / 110, 1) : 0; if (nope) nope.style.opacity = dx < -8 ? Math.min(-dx / 110, 1) : 0; };
   const start = x => sx = x;
-  const move = x => { dx = x - sx; el.style.transform = `translateX(${dx}px) rotate(${dx / 18}deg)`; };
-  const end = () => { if (dx > 110) onSwipe('right'); else if (dx < -110) onSwipe('left'); else el.style.transform = ''; dx = 0; };
+  const move = x => { dx = x - sx; el.style.transform = `translateX(${dx}px) rotate(${dx / 18}deg)`; stamps(); };
+  const end = () => { if (dx > 110) onSwipe('right'); else if (dx < -110) onSwipe('left'); else { el.style.transform = ''; if (like) like.style.opacity = 0; if (nope) nope.style.opacity = 0; } dx = 0; };
   el.addEventListener('mousedown', e => start(e.clientX));
   window.addEventListener('mousemove', e => { if (sx) move(e.clientX); });
   window.addEventListener('mouseup', () => { if (sx) { end(); sx = 0; } });

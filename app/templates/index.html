@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SwipeHire — Swipe right. Get hired.</title><link rel="stylesheet" href="/static/style.css"></head>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SwipeHire — Swipe right. Get hired.</title><link rel="stylesheet" href="/static/style.css?v=3"></head>
 <body>
 <header><div class="logo">💘 SwipeHire</div><div id="user-box"></div></header>
 <main>
@@ -30,8 +30,8 @@
  <nav id="main-nav"></nav>
  <div id="view-discovery" class="view">
   <div class="bar"><button onclick="rescan()">🔄 Rescan boards</button><span id="scan-result"></span><span id="pool-count"></span></div>
-  <div id="deck"></div><div class="swipe-btns"><button class="pass" onclick="swipeCurrent('left')">✕ Pass</button><button class="like" onclick="swipeCurrent('right')">♥ Apply</button></div>
-  <p class="hint">Drag the card, use the buttons, or press ← / → arrow keys. Right-swipe = auto-apply with a resume tailored from your Master Profile (facts only).</p>
+  <div id="deck"></div><div class="swipe-btns"><button class="pass" aria-label="Pass" title="Pass" onclick="swipeCurrent('left')">✕<span class="lbl">Pass</span></button><button class="like" aria-label="Apply" title="Apply" onclick="swipeCurrent('right')">♥<span class="lbl">Apply</span></button></div>
+  <p class="hint deck-hint">Drag the card, use the buttons, or press ← / → arrow keys. Right-swipe = auto-apply with a resume tailored from your Master Profile (facts only).</p>
  </div>
  <div id="view-applications" class="view hidden"><h2>My Applications</h2><div id="apps"></div></div>
  <div id="view-documents" class="view hidden"><h2>Document Vault &amp; Master Profile</h2>
@@ -61,12 +61,13 @@
   <h3>Post a job</h3><label>Title <input id="ej-title" placeholder="Backend Developer"></label><label>Location <input id="ej-loc" placeholder="Remote"></label><label>Description <textarea id="ej-desc" rows="3"></textarea></label><label>Tags / skills (comma) <input id="ej-tags" placeholder="Python, Flask, SQL"></label><label><input type="checkbox" id="ej-remote"> Remote</label><button onclick="postJob()">Post job</button>
   <div id="my-jobs"></div>
   <h3>Swipe candidates</h3><label>For job <select id="emp-job-select" onchange="loadEmpDeck()"></select></label>
-  <div id="emp-deck"></div><div class="swipe-btns"><button class="pass" onclick="empSwipe('left')">✕ Pass</button><button class="like" onclick="empSwipe('right')">♥ Interested</button></div>
+  <div id="emp-deck"></div><div class="swipe-btns"><button class="pass" aria-label="Pass" title="Pass" onclick="empSwipe('left')">✕<span class="lbl">Pass</span></button><button class="like" aria-label="Interested" title="Interested" onclick="empSwipe('right')">♥<span class="lbl">Interested</span></button></div>
  </div>
  <div id="view-matches" class="view hidden"><h2>Matches ❤️</h2><div id="matches"></div></div>
 </section>
 </main>
 <footer>SwipeHire demo — accounts + data are per-user. On Vercel, SQLite/uploads live in /tmp and are ephemeral; see README.</footer>
 <div id="modal" class="hidden"><div class="modal-box"><button class="modal-close" onclick="closeModal()">✕</button><div id="modal-content"></div></div></div>
+<div id="match-overlay" class="hidden"><h2>It's a Match!</h2><p>You and <b id="match-title"></b> like each other</p><p id="match-sub"></p><div class="match-avatars" id="match-avatars"></div><div class="match-btns"><button class="match-send" onclick="closeMatch(true)">Send a message</button><button class="match-keep" onclick="closeMatch(false)">Keep swiping</button></div></div>
 <script>var jacksonEmail = "";</script>
-<script src="/static/app.js"></script></body></html>
+<script src="/static/app.js?v=3"></script></body></html>
