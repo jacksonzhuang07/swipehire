@@ -96,3 +96,19 @@ def seed_all(conn, uploads_dir=None):
         conn.commit()
         emp_id = cur.lastrowid
     _ensure_user(conn, "employer@swipehire.app", "employer", "Demo Hiring Manager", employer_id=emp_id)
+    # Showcase jobs owned by the demo employer so the employer side works on
+    # first login (feed, swiping, matches). Stable external_ids keep this
+    # idempotent; the UPDATE repairs databases seeded before this existed.
+    demo_emp_jobs = [
+        {"external_id": "demo-emp-job-fullstack", "title": "Full Stack Developer", "company": "Demo Employer Inc.",
+         "location": "Montreal, QC", "remote": 1, "salary_min": 85000, "salary_max": 115000, "salary_text": "$85k-$115k",
+         "description": "[Demo posting] Build product features end-to-end in Python/Flask and React. Demo Employer Inc. is the built-in sample employer for trying SwipeHire's employer side.",
+         "url": "", "source": "employer", "tags": ["Python", "JavaScript", "React", "SQL", "Flask"], "employer_id": emp_id},
+        {"external_id": "demo-emp-job-solutions", "title": "Solutions Consultant", "company": "Demo Employer Inc.",
+         "location": "Montreal, QC (Hybrid)", "remote": 0, "salary_min": 90000, "salary_max": 120000, "salary_text": "$90k-$120k",
+         "description": "[Demo posting] Client-facing technical consulting: discovery, solution design, automation. Demo posting for trying SwipeHire's employer side.",
+         "url": "", "source": "employer", "tags": ["Consulting", "Automation", "SQL", "APIs"], "employer_id": emp_id},
+    ]
+    insert_jobs(conn, demo_emp_jobs)
+    conn.execute("UPDATE jobs SET employer_id=? WHERE external_id IN ('demo-emp-job-fullstack','demo-emp-job-solutions') AND (employer_id IS NULL OR employer_id!=?)", (emp_id, emp_id))
+    conn.commit()
