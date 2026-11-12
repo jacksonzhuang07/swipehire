@@ -1,31 +1,72 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SwipeHire — Swipe right. Get hired.</title><link rel="stylesheet" href="/static/style.css"></head>
 <body>
-<header><div class="logo">💘 SwipeHire</div>
-<div class="role-switch"><button id="btn-candidate" class="active" onclick="setRole('candidate')">👤 Candidate</button><button id="btn-employer" onclick="setRole('employer')">🏢 Employer</button></div>
-<nav><button onclick="showView('discovery')">Discover</button><button onclick="showView('applications')">My Applications</button><button onclick="showView('profile')">Profile</button><button onclick="showView('employer')">Employer Dashboard</button><button onclick="showView('matches')">Matches ❤️</button></nav></header>
+<header><div class="logo">💘 SwipeHire</div><div id="user-box"></div></header>
 <main>
-<section class="hero"><h1>Swipe right. We apply for you.</h1><p>Upload your resume, swipe on jobs scored against your skills, and SwipeHire's apply pipeline handles the rest. Employers swipe too — a mutual right-swipe is a Match.</p><p class="honest">Honest labels: jobs show their real source (Remotive / Arbeitnow / Seeded fallback / Employer). Applications via a real external link are marked “external link”; jobs with no apply API use a clearly-labelled <b>simulated executor</b>.</p></section>
+<!-- AUTH -->
+<section id="auth-screen">
+ <div class="hero"><h1>Swipe right. We apply for you.</h1><p>Upload your resume and supporting documents — SwipeHire compiles one Master Profile, ranks jobs on a For You feed built from your preferences and your swipes, and tailors a truthful resume (facts only, gaps listed) for every right-swipe. Employers swipe on candidates too — a mutual right-swipe is a Match.</p></div>
+ <div class="auth-card">
+  <div class="tabs"><button id="tab-login" class="active" onclick="authTab('login')">Log in</button><button id="tab-signup" onclick="authTab('signup')">Sign up</button></div>
+  <div id="auth-login">
+   <label>Email <input id="li-email" type="email"></label><label>Password <input id="li-pass" type="password"></label>
+   <button class="big" onclick="doLogin()">Log in</button>
+   <p class="hint">Instant demo accounts (password <b>demo</b>):</p>
+   <button onclick="demoLogin('demo@swipehire.app')">▶ Demo candidate</button>
+   <button onclick="demoLogin('employer@swipehire.app')">▶ Demo employer</button>
+   <button onclick="demoLogin(jacksonEmail)">▶ Jackson (demo seed)</button>
+  </div>
+  <div id="auth-signup" class="hidden">
+   <label>I am a <select id="su-role"><option value="candidate">Candidate</option><option value="employer">Employer</option></select></label>
+   <label>Full name <input id="su-name"></label><label>Company (employers) <input id="su-company"></label>
+   <label>Email <input id="su-email" type="email"></label><label>Password <input id="su-pass" type="password"></label>
+   <button class="big" onclick="doSignup()">Create account</button>
+  </div>
+  <p id="auth-error" class="error"></p>
+ </div>
+</section>
 
-<div id="view-discovery" class="view">
- <div class="bar"><button onclick="rescan()">🔄 Rescan boards</button><span id="scan-result"></span><span id="cand-label"></span></div>
- <div id="deck"></div><div class="swipe-btns"><button class="pass" onclick="swipeCurrent('left')">✕ Pass</button><button class="like" onclick="swipeCurrent('right')">♥ Apply</button></div>
- <p class="hint">Drag the card, use the buttons, or press ← / → arrow keys.</p>
-</div>
-
-<div id="view-applications" class="view hidden"><h2>My Applications</h2><div id="apps"></div></div>
-
-<div id="view-profile" class="view hidden"><h2>Candidate Profile</h2>
- <h3>Upload / paste resume (.txt, .md, .pdf)</h3><input type="file" id="resume-file" accept=".txt,.md,.pdf"><textarea id="resume-text" rows="6" placeholder="…or paste resume text here"></textarea><button onclick="uploadResume()">Parse resume</button>
- <div id="profile-card"></div>
- <h3>Preferences</h3><label>Target titles (comma separated)<input id="pref-titles"></label><label>Locations (comma separated)<input id="pref-locs"></label><label>Min salary <input id="pref-salary" type="number"></label><label><input type="checkbox" id="pref-remote"> Remote only</label><button onclick="savePrefs()">Save preferences</button>
-</div>
-
-<div id="view-employer" class="view hidden"><h2>Employer Dashboard</h2>
- <h3>Post a job</h3><label>Title <input id="ej-title" placeholder="Backend Developer"></label><label>Location <input id="ej-loc" placeholder="Remote"></label><label>Description <textarea id="ej-desc" rows="3"></textarea></label><label>Tags / skills (comma) <input id="ej-tags" placeholder="Python, Flask, SQL"></label><label><input type="checkbox" id="ej-remote"> Remote</label><button onclick="postJob()">Post job</button>
- <div id="my-jobs"></div><h3>Swipe candidates for your latest job</h3><div id="emp-deck"></div><div class="swipe-btns"><button class="pass" onclick="empSwipe('left')">✕ Pass</button><button class="like" onclick="empSwipe('right')">♥ Interested</button></div>
-</div>
-
-<div id="view-matches" class="view hidden"><h2>Matches ❤️</h2><div id="matches"></div></div>
+<!-- APP -->
+<section id="app-screen" class="hidden">
+ <nav id="main-nav"></nav>
+ <div id="view-discovery" class="view">
+  <div class="bar"><button onclick="rescan()">🔄 Rescan boards</button><span id="scan-result"></span><span id="pool-count"></span></div>
+  <div id="deck"></div><div class="swipe-btns"><button class="pass" onclick="swipeCurrent('left')">✕ Pass</button><button class="like" onclick="swipeCurrent('right')">♥ Apply</button></div>
+  <p class="hint">Drag the card, use the buttons, or press ← / → arrow keys. Right-swipe = auto-apply with a resume tailored from your Master Profile (facts only).</p>
+ </div>
+ <div id="view-applications" class="view hidden"><h2>My Applications</h2><div id="apps"></div></div>
+ <div id="view-documents" class="view hidden"><h2>Document Vault &amp; Master Profile</h2>
+  <p class="hint">Add your resume plus supporting documents — references, certifications, project write-ups, transcripts. Facts from every document merge into your Master Profile (with the source document shown), and your Compiled Master Resume rebuilds automatically.</p>
+  <div class="card">
+   <label>Document type <select id="doc-type"><option value="resume">Resume (primary)</option><option value="cover_letter">Cover letter</option><option value="reference_letter">Reference letter</option><option value="project_writeup">Project write-up</option><option value="transcript">Transcript</option><option value="certification">Certification</option><option value="other">Other</option></select></label>
+   <label>Title <input id="doc-title" placeholder="e.g. Reference — Jane Smith, Acme"></label>
+   <input type="file" id="doc-file" accept=".txt,.md,.pdf">
+   <textarea id="doc-text" rows="5" placeholder="…or paste document text here"></textarea>
+   <button onclick="addDocument()">Add document &amp; recompile</button>
+  </div>
+  <h3>My documents</h3><div id="doc-list"></div>
+  <h3>Master Profile (every fact shows its source document)</h3><div id="master-profile"></div>
+  <h3>Compiled Master Resume</h3>
+  <div class="bar"><button onclick="downloadCompiled('txt')">⬇ Download .txt</button><button onclick="downloadCompiled('html')">🖨 Print-friendly HTML</button></div>
+  <pre id="compiled-resume" class="resume-box"></pre>
+ </div>
+ <div id="view-profile" class="view hidden"><h2>My Profile</h2>
+  <div id="profile-card"></div>
+  <h3>Profile picture</h3><input type="file" id="photo-file" accept=".png,.jpg,.jpeg"><button onclick="uploadPhoto()">Upload photo</button>
+  <h3>Resume quick upload (.txt, .md, .pdf)</h3><input type="file" id="resume-file" accept=".txt,.md,.pdf"><textarea id="resume-text" rows="5" placeholder="…or paste resume text here"></textarea><button onclick="uploadResume()">Parse resume</button>
+  <h3>Preferences (these feed your For You ranking)</h3><label>Target titles (comma separated)<input id="pref-titles"></label><label>Locations (comma separated)<input id="pref-locs"></label><label>Min salary <input id="pref-salary" type="number"></label><label><input type="checkbox" id="pref-remote"> Remote only</label><button onclick="savePrefs()">Save preferences</button>
+ </div>
+ <div id="view-employer" class="view hidden"><h2>Employer Dashboard</h2>
+  <div id="emp-profile"></div>
+  <h3>Company logo</h3><input type="file" id="logo-file" accept=".png,.jpg,.jpeg"><button onclick="uploadLogo()">Upload logo</button>
+  <h3>Post a job</h3><label>Title <input id="ej-title" placeholder="Backend Developer"></label><label>Location <input id="ej-loc" placeholder="Remote"></label><label>Description <textarea id="ej-desc" rows="3"></textarea></label><label>Tags / skills (comma) <input id="ej-tags" placeholder="Python, Flask, SQL"></label><label><input type="checkbox" id="ej-remote"> Remote</label><button onclick="postJob()">Post job</button>
+  <div id="my-jobs"></div>
+  <h3>Swipe candidates</h3><label>For job <select id="emp-job-select" onchange="loadEmpDeck()"></select></label>
+  <div id="emp-deck"></div><div class="swipe-btns"><button class="pass" onclick="empSwipe('left')">✕ Pass</button><button class="like" onclick="empSwipe('right')">♥ Interested</button></div>
+ </div>
+ <div id="view-matches" class="view hidden"><h2>Matches ❤️</h2><div id="matches"></div></div>
+</section>
 </main>
-<footer>SwipeHire demo — SQLite on Vercel is ephemeral (/tmp); see README.</footer>
+<footer>SwipeHire demo — accounts + data are per-user. On Vercel, SQLite/uploads live in /tmp and are ephemeral; see README.</footer>
+<div id="modal" class="hidden"><div class="modal-box"><button class="modal-close" onclick="closeModal()">✕</button><div id="modal-content"></div></div></div>
+<script>var jacksonEmail = "";</script>
 <script src="/static/app.js"></script></body></html>

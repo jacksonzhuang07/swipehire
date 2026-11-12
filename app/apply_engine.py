@@ -39,8 +39,27 @@ def apply_for_job(conn, candidate, job):
     else:
         status, method = "submitted", "simulated_executor"
         proof = "Simulated executor: application package assembled from stored resume facts and marked submitted in SwipeHire. This job has no real apply API, so no external submission occurred."
-    cur = conn.execute("INSERT INTO applications(candidate_id,job_id,status,method,proof,answers,needs_review) VALUES(?,?,?,?,?,?,?)",
-        (candidate["id"], job["id"], status, method, proof, json.dumps(answers), json.dumps(needs)))
+    # Truthful tailoring: build a per-job resume from Master Profile facts only.
+    tailored_text, coverage_json, tailored_flag = "", "{}", 0
+    try:
+        from .tailoring import tailor_resume
+        master = candidate.get("master_profile") or {}
+        if isinstance(master, str):
+            master = json.loads(master or "{}")
+        if not master:  # fall back to the candidate's own parsed fields — still facts only
+            master = {"skills": {s: {"sources": []} for s in (candidate.get("skills") or [])},
+                      "titles": [candidate.get("title", "")] if candidate.get("title") else [],
+                      "years_exp": candidate.get("years_exp", 0), "experience": [], "education": [], "certifications": []}
+        t = tailor_resume(master, candidate, job)
+        tailored_text = t["text"]
+        coverage_json = json.dumps({"covered": t["covered"], "missing": t["missing"], "gaps": t["gaps"]})
+        tailored_flag = 1
+        if t["missing"]:
+            needs = list(needs) + [f"Keyword gap (not in your profile, left out of tailored resume): {k}" for k in t["missing"]]
+    except Exception:
+        pass
+    cur = conn.execute("INSERT INTO applications(candidate_id,job_id,status,method,proof,answers,needs_review,tailored_resume,coverage,tailored) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (candidate["id"], job["id"], status, method, proof, json.dumps(answers), json.dumps(needs), tailored_text, coverage_json, tailored_flag))
     conn.commit()
     from .db import row_to_dict
     return row_to_dict(conn.execute("SELECT * FROM applications WHERE id=?", (cur.lastrowid,)).fetchone()), True
