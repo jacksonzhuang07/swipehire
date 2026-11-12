@@ -1,4 +1,4 @@
-let ME = null, deck = [], empDeck = [], empJob = null;
+let ME = null, deck = [], empDeck = [], empJob = null, deckType = 'jobs', filterTimer = null;
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(p, o) { const r = await fetch(p, o); let j = null; try { j = await r.json(); } catch (e) {} return { status: r.status, json: j }; }
@@ -7,10 +7,19 @@ const POST = (p, body) => api(p, { method: 'POST', headers: { 'Content-Type': 'a
 
 function initials(name) { return (name || '?').split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase(); }
 function avatarHTML(person, cls) {
+  // v9/N1: a profile VIDEO plays when present; the picture is the fallback.
+  if (person.video_url) return `<video class="avatar ${cls || ''}" src="${esc(person.video_url)}" autoplay muted loop playsinline></video>`;
   if (person.photo_url) return `<img class="avatar ${cls || ''}" src="${esc(person.photo_url)}" alt="">`;
   if (person.logo_url) return `<img class="avatar ${cls || ''}" src="${esc(person.logo_url)}" alt="">`;
   return `<span class="avatar initials ${cls || ''}">${esc(initials(person.name || person.company || '?'))}</span>`;
 }
+function heroMediaHTML(mediaUrl, mediaType, initial) {
+  if (mediaUrl && mediaType === 'video') return `<video class="hero-img" src="${esc(mediaUrl)}" autoplay muted loop playsinline></video>`;
+  if (mediaUrl) return `<img class="hero-img" src="${esc(mediaUrl)}" alt="">`;
+  return `<div class="hero-center"><span class="hero-initial">${esc(initial || '?')}</span></div>`;
+}
+const MODE_LABEL = { remote: '🏠 Remote', hybrid: '🔀 Hybrid', in_person: '🏢 In person', unspecified: '' };
+function modeLabel(j) { return MODE_LABEL[j.work_mode || 'unspecified'] || (j.remote ? '🏠 Remote' : ''); }
 
 // ---------- auth ----------
 function authTab(t) {
@@ -101,19 +110,83 @@ function badgesHTML(scoreLabel, feedScore, isStretch) {
 }
 function cardHTML(j) {
   const initial = esc((j.company || '?').trim().charAt(0).toUpperCase() || '?');
-  return `<div class="card job-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero"><div class="segments"><i></i></div>${badgesHTML(j.score + '% match', j.feed_score, j.is_stretch)}<div class="hero-center"><span class="hero-initial">${initial}</span></div><div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div><div class="card-body"><p class="meta-line">${j.requires_login ? '<span class="lock-badge">🔒 Login required</span>' : ''}<span>📍 ${esc(j.location || 'Unspecified')}${j.remote ? ' · Remote' : ''}</span>${j.salary_text ? `<span class="salary">${esc(j.salary_text)}</span>` : ''}<span>Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></p><p class="desc">${esc((j.description || '').slice(0, 400))}</p><div class="chips">${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a class="apply-link" href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div></div>`;
+  const ml = modeLabel(j);
+  return `<div class="card job-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero${j.media_url ? ' photo' : ''}"><div class="segments"><i></i></div>${badgesHTML(j.score + '% match', j.feed_score, j.is_stretch)}${heroMediaHTML(j.media_url, j.media_type, initial)}<div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div><div class="card-body"><p class="meta-line">${j.requires_login ? '<span class="lock-badge">🔒 Login required</span>' : ''}<span>📍 ${esc(j.location || 'Unspecified')}</span>${ml ? `<span class="chip">${ml}</span>` : ''}${j.salary_text ? `<span class="salary">${esc(j.salary_text)}</span>` : ''}<span>Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></p><p class="desc">${esc((j.description || '').slice(0, 400))}</p><div class="chips">${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a class="apply-link" href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div></div>`;
 }
-function peekHTML(j) {
-  if (!j) return '';
-  const initial = esc((j.company || '?').trim().charAt(0).toUpperCase() || '?');
-  return `<div class="card peek" aria-hidden="true"><div class="card-hero"><div class="hero-center"><span class="hero-initial">${initial}</span></div><div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div></div>`;
+function recruiterCardHTML(r) {
+  const initial = esc((r.company || '?').trim().charAt(0).toUpperCase() || '?');
+  const titles = (r.job_titles || []).map(t => `<span class="chip">${esc(t)}</span>`).join('');
+  const why = `<div class="why"><b>Why this recruiter</b><ul>${(r.why || []).map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>`;
+  return `<div class="card recruiter-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero${r.media_url ? ' photo' : ''}"><div class="segments"><i></i></div>${badgesHTML('Recruiter', r.feed_score, false)}${heroMediaHTML(r.media_url, r.media_type, initial)}<div class="hero-scrim"><h2>${esc(r.company)}</h2><p class="hero-sub">${esc(r.name || 'Hiring team')} · ${r.open_jobs} open role${r.open_jobs === 1 ? '' : 's'}</p></div></div><div class="card-body"><p class="desc">Right-swipe to tell ${esc(r.company)} you're interested in working there — no application is sent. If they right-swipe you for any of their jobs, it's a Match.</p><div class="chips">${titles}</div>${why}</div></div>`;
 }
-async function loadDeck() { const r = await api('/api/discovery'); deck = r.json || []; $('pool-count').textContent = deck.length + ' jobs in your feed'; renderDeck(); }
-function renderDeck() { $('deck').innerHTML = deck.length ? peekHTML(deck[1]) + cardHTML(deck[0]) : '<div class="card"><h2>No more jobs 🎉</h2><p>Rescan the boards or check back later.</p></div>'; attachDrag('top-card', swipeCurrent); }
+function peekHTML(item) {
+  if (!item) return '';
+  const isRec = item.kind === 'recruiter';
+  const initial = esc((item.company || '?').trim().charAt(0).toUpperCase() || '?');
+  const title = isRec ? item.company : item.title;
+  const sub = isRec ? (item.open_jobs + ' open roles') : item.company;
+  return `<div class="card peek" aria-hidden="true"><div class="card-hero">${heroMediaHTML(item.media_url, item.media_type, initial)}<div class="hero-scrim"><h2>${esc(title)}</h2><p class="hero-sub">${esc(sub)}</p></div></div></div>`;
+}
+function discoveryParams() {
+  const p = new URLSearchParams();
+  const q = $('f-q').value.trim(), loc = $('f-location').value.trim(), mode = $('f-mode').value;
+  if (q) p.set('q', q); if (loc) p.set('location', loc); if (mode) p.set('work_mode', mode);
+  const s = p.toString();
+  return s ? '?' + s : '';
+}
+function filtersActive() { return !!($('f-q').value.trim() || $('f-location').value.trim() || $('f-mode').value); }
+function setDeckType(t) {
+  deckType = t;
+  document.querySelectorAll('#deck-toggle button').forEach(b => b.classList.toggle('active', b.dataset.dt === t));
+  $('filter-bar').style.display = t === 'recruiters' ? 'none' : '';
+  loadDeck();
+}
+function filterChanged() { clearTimeout(filterTimer); filterTimer = setTimeout(() => { if (deckType !== 'recruiters') loadDeck(); }, 300); }
+async function loadDeck() {
+  const likes = await apiJ('/api/me/likes');
+  if (likes && likes.likes > 0) { $('my-likes').textContent = `♥ ${likes.likes} like${likes.likes === 1 ? '' : 's'}`; $('my-likes').classList.remove('hidden'); }
+  let items = [];
+  if (deckType === 'jobs' || deckType === 'both') {
+    const r = await api('/api/discovery' + discoveryParams());
+    items = (r.json || []).map(j => ({ ...j, kind: 'job' }));
+  }
+  if (deckType === 'recruiters' || deckType === 'both') {
+    const recs = (await apiJ('/api/recruiters') || []).map(r => ({ ...r, kind: 'recruiter' }));
+    if (deckType === 'recruiters') items = recs;
+    else { // Both: a recruiter card after every 3 job cards, leftovers last
+      const mixed = []; let ri = 0;
+      items.forEach((j, i) => { mixed.push(j); if (i % 3 === 2 && ri < recs.length) mixed.push(recs[ri++]); });
+      while (ri < recs.length) mixed.push(recs[ri++]);
+      items = mixed;
+    }
+  }
+  deck = items;
+  $('pool-count').textContent = deckType === 'recruiters' ? deck.length + ' recruiters in your feed' : deck.length + ' cards in your feed';
+  renderDeck();
+}
+function renderDeck() {
+  if (!deck.length) {
+    $('deck').innerHTML = deckType !== 'recruiters' && filtersActive()
+      ? '<div class="card"><h2>No matches for those filters 🔍</h2><p>Clear the keyword / location / work-mode filters to see your whole feed.</p></div>'
+      : '<div class="card"><h2>No more cards 🎉</h2><p>Rescan the boards or check back later.</p></div>';
+    return;
+  }
+  const top = deck[0];
+  $('deck').innerHTML = peekHTML(deck[1]) + (top.kind === 'recruiter' ? recruiterCardHTML(top) : cardHTML(top));
+  attachDrag('top-card', swipeCurrent);
+}
 async function rescan() { $('scan-result').textContent = 'Scanning…'; const r = await POST('/api/jobs/scan'); const rep = r.json || {}; $('scan-result').textContent = Object.entries(rep).filter(([k, v]) => v && typeof v === 'object').map(([k, v]) => `${k}: +${v.new} new (${v.status})`).join(' · ') + (rep.pool_total ? ` · Pool total: ${rep.pool_total}` : ''); loadDeck(); }
 async function swipeCurrent(dir) {
   if (!deck.length) return;
-  const j = deck[0];
+  const item = deck[0];
+  if (item.kind === 'recruiter') {
+    const r = await POST('/api/recruiter-swipe', { employer_id: item.employer_id, direction: dir });
+    deck.shift();
+    if (r.json && r.json.match) showMatch({ name: item.company, sub: 'You liked their recruiter profile — and they liked you back', otherInitial: (item.company || '?').charAt(0).toUpperCase(), otherPhoto: item.media_type === 'image' ? item.media_url : '' });
+    renderDeck();
+    return;
+  }
+  const j = item;
   const r = await POST('/api/swipe', { job_id: j.id, direction: dir });
   deck.shift();
   if (r.json && r.json.match) showMatch({ name: j.title, sub: j.company, otherInitial: (j.company || '?').charAt(0).toUpperCase(), otherPhoto: '' });
@@ -198,7 +271,7 @@ async function loadProfile() {
   $('pref-salary').value = c.min_salary || ''; $('pref-remote').checked = !!c.remote_only;
 }
 async function uploadPhoto() {
-  const f = $('photo-file').files[0]; if (!f) { alert('Pick an image first'); return; }
+  const f = $('photo-file').files[0]; if (!f) { alert('Pick a picture or video first'); return; }
   const fd = new FormData(); fd.append('file', f);
   const r = await fetch('/api/profile/photo', { method: 'POST', body: fd }); const j = await r.json();
   if (r.status !== 200) { alert(j.error || 'Upload failed'); return; }
@@ -219,29 +292,42 @@ async function savePrefs() {
 // ---------- employer ----------
 async function loadEmployer() {
   const me = await apiJ('/api/auth/me'); ME = me; const e = me.employer || {};
-  $('emp-profile').innerHTML = `<div class="card"><div class="profile-head">${avatarHTML(e, 'large')}<div><h3>${esc(e.company || '')}</h3><p>${esc(e.name || '')} · ${esc(e.email || '')}</p></div></div></div>`;
+  $('emp-profile').innerHTML = `<div class="card"><div class="profile-head">${avatarHTML(e, 'large')}<div><h3>${esc(e.company || '')}</h3><p>${esc(e.name || '')} · ${esc(e.email || '')}</p><p><span class="likes-pill">♥ ${e.likes_count || 0} recruiter-profile like${e.likes_count === 1 ? '' : 's'}</span></p></div></div></div>`;
+  $('emp-media-status').textContent = e.has_media ? '✅ Recruiter media on file — your jobs inherit it.' : '⚠️ No recruiter media yet: a picture or video is required before a job can be published without media attached to the job itself.';
   const jobs = await apiJ('/api/employer/jobs') || [];
-  $('my-jobs').innerHTML = '<h4>My jobs</h4>' + (jobs.length ? jobs.map(j => `<p>• ${esc(j.title)} — ${esc(j.location || '')} (${esc(j.source)})</p>`).join('') : '<p class="meta">None yet.</p>');
-  $('emp-job-select').innerHTML = jobs.map(j => `<option value="${j.id}">${esc(j.title)}</option>`).join('');
+  $('my-jobs').innerHTML = '<h4>My jobs</h4>' + (jobs.length ? jobs.map(j => `<p>• ${esc(j.title)} — ${esc(j.location || '')} ${modeLabel(j)} (${esc(j.source)}) <span class="likes-pill">♥ ${j.likes_count || 0}</span></p>`).join('') : '<p class="meta">None yet.</p>');
+  $('emp-job-select').innerHTML = jobs.map(j => `<option value="${j.id}">${esc(j.title)} (♥ ${j.likes_count || 0})</option>`).join('');
   loadEmpDeck();
 }
 async function postJob() {
-  const tags = $('ej-tags').value.split(',').map(x => x.trim()).filter(Boolean);
-  const r = await POST('/api/employer/jobs', { title: $('ej-title').value, location: $('ej-loc').value, description: $('ej-desc').value, tags: tags, remote: $('ej-remote').checked });
+  const file = $('ej-media').files[0];
+  let r;
+  if (file) { // attach media to the posting itself (multipart variant)
+    const fd = new FormData();
+    fd.append('title', $('ej-title').value); fd.append('location', $('ej-loc').value);
+    fd.append('description', $('ej-desc').value); fd.append('tags', $('ej-tags').value);
+    fd.append('work_mode', $('ej-mode').value); fd.append('remote', $('ej-remote').checked ? 'true' : '');
+    fd.append('media', file);
+    const resp = await fetch('/api/employer/jobs', { method: 'POST', body: fd });
+    let j = null; try { j = await resp.json(); } catch (e) {}
+    r = { status: resp.status, json: j };
+  } else {
+    const tags = $('ej-tags').value.split(',').map(x => x.trim()).filter(Boolean);
+    r = await POST('/api/employer/jobs', { title: $('ej-title').value, location: $('ej-loc').value, description: $('ej-desc').value, tags: tags, remote: $('ej-remote').checked, work_mode: $('ej-mode').value });
+  }
   if (r.status !== 201) { alert((r.json && r.json.error) || 'Failed'); return; }
   loadEmployer();
 }
 function empCardHTML(c, job) {
-  const hero = c.photo_url
-    ? `<div class="card-hero photo"><img class="hero-img" src="${esc(c.photo_url)}" alt=""><div class="segments"><i></i></div>${badgesHTML(c.score + '% fit', c.feed_score, false)}<div class="hero-scrim"><h2>${esc(c.name)}</h2><p class="hero-sub">${esc(c.title || '')} · ${c.years_exp || 0} yrs</p></div></div>`
-    : `<div class="card-hero"><div class="segments"><i></i></div>${badgesHTML(c.score + '% fit', c.feed_score, false)}<div class="hero-center"><span class="hero-initial">${esc(initials(c.name || '?'))}</span></div><div class="hero-scrim"><h2>${esc(c.name)}</h2><p class="hero-sub">${esc(c.title || '')} · ${c.years_exp || 0} yrs</p></div></div>`;
+  // v9/N1: candidate VIDEO plays when present, photo otherwise.
+  const media = c.video_url ? [c.video_url, 'video'] : (c.photo_url ? [c.photo_url, 'image'] : [null, '']);
+  const hero = `<div class="card-hero${media[0] ? ' photo' : ''}"><div class="segments"><i></i></div>${badgesHTML(c.score + '% fit', c.feed_score, false)}${heroMediaHTML(media[0], media[1], initials(c.name || '?'))}<div class="hero-scrim"><h2>${esc(c.name)}</h2><p class="hero-sub">${esc(c.title || '')} · ${c.years_exp || 0} yrs</p></div></div>`;
   return `<div class="card cand-card" id="emp-top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div>${hero}<div class="card-body"><p class="desc">${esc(c.summary || '')}</p><div class="chips">${(c.skills || []).map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div><div class="why"><b>Why this candidate</b><ul>${(c.why || []).map(w => `<li>${esc(w)}</li>`).join('')}</ul></div></div></div>`;
 }
 function empPeekHTML(c) {
   if (!c) return '';
-  const hero = c.photo_url
-    ? `<div class="card-hero photo"><img class="hero-img" src="${esc(c.photo_url)}" alt=""><div class="hero-scrim"><h2>${esc(c.name)}</h2></div></div>`
-    : `<div class="card-hero"><div class="hero-center"><span class="hero-initial">${esc(initials(c.name || '?'))}</span></div><div class="hero-scrim"><h2>${esc(c.name)}</h2></div></div>`;
+  const media = c.video_url ? [c.video_url, 'video'] : (c.photo_url ? [c.photo_url, 'image'] : [null, '']);
+  const hero = `<div class="card-hero${media[0] ? ' photo' : ''}">${heroMediaHTML(media[0], media[1], initials(c.name || '?'))}<div class="hero-scrim"><h2>${esc(c.name)}</h2></div></div>`;
   return `<div class="card peek" aria-hidden="true">${hero}</div>`;
 }
 async function loadEmpDeck() {
@@ -264,7 +350,7 @@ function loadEmpDeckRender() {
   attachDrag('emp-top-card', empSwipe);
 }
 async function uploadLogo() {
-  const f = $('logo-file').files[0]; if (!f) { alert('Pick an image first'); return; }
+  const f = $('logo-file').files[0]; if (!f) { alert('Pick a picture or video first'); return; }
   const fd = new FormData(); fd.append('file', f);
   const r = await fetch('/api/employer/logo', { method: 'POST', body: fd }); const j = await r.json();
   if (r.status !== 200) { alert(j.error || 'Upload failed'); return; }
