@@ -77,19 +77,31 @@ def _seed_demo_employer_media(conn, emp_id, uploads_dir):
     """v9/N1: media (picture or video) is mandatory on recruiter profiles
     for NEW job posts. Give the demo employer a generated placeholder
     picture at seed time so the demo account satisfies the rule the same
-    way a real recruiter who uploaded a logo does."""
+    way a real recruiter who uploaded a logo does.
+
+    The picture goes through storage.save_upload — the same path real
+    uploads take — so on the Blob backend it lands in the private store
+    and logo_blob_url is set. (The first version wrote a local file and
+    set only `logo`: fine locally, but in production the file sat on an
+    ephemeral disk no serving instance could see and the /uploads proxy
+    had no blob URL to fetch — the recruiter card rendered a black box.
+    Caught by the Nov 12, 2026 production checklist.) The repair branch
+    below also heals rows already stuck in that state."""
+    from . import storage
     if not uploads_dir:
         return
-    row = conn.execute("SELECT logo, video FROM employers WHERE id=?", (emp_id,)).fetchone()
-    if not row or row["logo"] or row["video"]:
+    row = conn.execute("SELECT logo, logo_blob_url, video FROM employers WHERE id=?", (emp_id,)).fetchone()
+    if not row or row["video"]:
         return
+    if row["logo"] and (row["logo_blob_url"] or not storage.blob_enabled()):
+        return  # media present and reachable on this backend
     try:
         name = "seed_demo_employer.png"
-        dest = os.path.join(uploads_dir, name)
-        if not os.path.exists(dest):
-            with open(dest, "wb") as f:
-                f.write(_solid_png(480, 360, (253, 38, 122)))
-        conn.execute("UPDATE employers SET logo=? WHERE id=?", (name, emp_id))
+        blob_url = storage.save_upload(uploads_dir, name,
+                                       _solid_png(480, 360, (253, 38, 122)),
+                                       "image/png")
+        conn.execute("UPDATE employers SET logo=?, logo_blob_url=? WHERE id=?",
+                     (name, blob_url or "", emp_id))
         conn.commit()
     except Exception:
         pass
