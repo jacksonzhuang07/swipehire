@@ -9,6 +9,8 @@ from app.db import init_db
 from app.documents import parse_document_facts, merge_facts, empty_master, compile_resume
 from app.tailoring import tailor_resume
 from app.feed import rank_jobs
+from app import mailer
+from app.job_sources import normalize_himalayas, parse_wwr_feed, normalize_themuse
 
 RESUME = """Jane Doe
 Software Developer
@@ -437,3 +439,178 @@ def test_tailoring_via_swipe_right_flow(client):
     assert "covered" in t.json["coverage"] and "missing" in t.json["coverage"]
     dl = client.get(f"/api/applications/{apps[0]['id']}/tailored-resume?download=1")
     assert dl.status_code == 200 and b"Acme Corp" in dl.data
+
+# ---------------- v4: passwordless email-code sign-in ----------------
+
+import re, sqlite3
+
+@pytest.fixture()
+def mailbox(monkeypatch):
+    mailer.LAST_SENT.clear()
+    monkeypatch.setenv("SWIPEHIRE_MAIL_CAPTURE", "1")
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    return mailer.LAST_SENT
+
+def _request_code(client, email):
+    r = client.post("/api/auth/code/request", json={"email": email})
+    assert r.status_code == 200, r.data
+    assert mailer.LAST_SENT and mailer.LAST_SENT[-1]["to"] == email
+    m = re.search(r"\b(\d{6})\b", mailer.LAST_SENT[-1]["text"])
+    assert m, mailer.LAST_SENT[-1]["text"]
+    return m.group(1), r.json
+
+def _wrong_code(real):
+    return "999999" if real != "999999" else "000000"
+
+def test_code_happy_path_existing_user(client, mailbox):
+    code, resp = _request_code(client, "demo@swipehire.app")
+    assert resp["mail_mode"] == "demo"  # no mail service configured in tests
+    assert resp["demo_code"] == code    # demo mode surfaces the code, labelled
+    r = client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": code})
+    assert r.status_code == 200 and r.json["created"] is False
+    assert r.json["user"]["email"] == "demo@swipehire.app" and r.json["user"]["role"] == "candidate"
+    assert client.get("/api/auth/me").status_code == 200
+
+def test_code_new_email_creates_account(client, mailbox):
+    code, _ = _request_code(client, "newbie@example.com")
+    r = client.post("/api/auth/code/verify", json={"email": "newbie@example.com", "code": code, "role": "employer"})
+    assert r.status_code == 201 and r.json["created"] is True
+    assert r.json["user"]["role"] == "employer" and r.json["user"]["employer"]["email"] == "newbie@example.com"
+    assert client.get("/api/auth/me").json["email"] == "newbie@example.com"
+    # default role is candidate when none is given
+    client.post("/api/auth/logout")
+    code2, _ = _request_code(client, "second@example.com")
+    r2 = client.post("/api/auth/code/verify", json={"email": "second@example.com", "code": code2})
+    assert r2.status_code == 201 and r2.json["user"]["role"] == "candidate"
+
+def test_code_request_generic_for_unknown_email(client, mailbox):
+    # Same success shape whether or not the account exists (no existence leak).
+    _, resp = _request_code(client, "ghost@nowhere.example")
+    assert resp["ok"] is True and "message" in resp
+
+def test_code_wrong_rejected_then_correct_works(client, mailbox):
+    code, _ = _request_code(client, "demo@swipehire.app")
+    r = client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": _wrong_code(code)})
+    assert r.status_code == 401
+    assert client.get("/api/auth/me").status_code == 401
+    r = client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": code})
+    assert r.status_code == 200
+
+def test_code_single_use(client, mailbox):
+    code, _ = _request_code(client, "demo@swipehire.app")
+    assert client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": code}).status_code == 200
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": code})
+    assert r.status_code == 401
+
+def test_code_max_attempts(app, client, mailbox):
+    code, _ = _request_code(client, "demo@swipehire.app")
+    for _ in range(5):
+        assert client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": _wrong_code(code)}).status_code == 401
+    # even the correct code is now refused (attempt cap reached)
+    assert client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": code}).status_code == 401
+
+def test_code_expired_rejected(app, client, mailbox):
+    code, _ = _request_code(client, "demo@swipehire.app")
+    conn = sqlite3.connect(app.config["DB_PATH"])
+    conn.execute("UPDATE login_codes SET expires_at='2000-01-01T00:00:00+00:00'")
+    conn.commit(); conn.close()
+    r = client.post("/api/auth/code/verify", json={"email": "demo@swipehire.app", "code": code})
+    assert r.status_code == 401
+
+def test_code_stored_hashed_only(app, client, mailbox):
+    code, _ = _request_code(client, "demo@swipehire.app")
+    conn = sqlite3.connect(app.config["DB_PATH"])
+    rows = conn.execute("SELECT code_hash FROM login_codes").fetchall()
+    conn.close()
+    assert rows and all(code not in r[0] and r[0].startswith(("scrypt:", "pbkdf2:")) for r in rows)
+
+def test_code_rate_limit(client, mailbox):
+    for _ in range(3):
+        assert client.post("/api/auth/code/request", json={"email": "rl@example.com"}).status_code == 200
+    r = client.post("/api/auth/code/request", json={"email": "rl@example.com"})
+    assert r.status_code == 429
+    # a different email is unaffected
+    assert client.post("/api/auth/code/request", json={"email": "other@example.com"}).status_code == 200
+
+def test_password_login_still_works_after_code_signup(client, mailbox):
+    # password accounts are untouched by the code flow
+    u = signup_candidate(client, "pw@example.com", "secret1")
+    client.post("/api/auth/logout")
+    code, _ = _request_code(client, "pw@example.com")
+    r = client.post("/api/auth/code/verify", json={"email": "pw@example.com", "code": code})
+    assert r.status_code == 200 and r.json["created"] is False
+    client.post("/api/auth/logout")
+    assert client.post("/api/auth/login", json={"email": "pw@example.com", "password": "secret1"}).status_code == 200
+
+# ---------------- v4: cron rescan ----------------
+
+def test_cron_rescan_runs_scan(client, monkeypatch):
+    import app as app_module
+    calls = {}
+    def fake_scan(conn):
+        calls["ran"] = True
+        return {"seeded": {"found": 14, "new": 0, "status": "ok"}, "pool_total": 14, "total_new": 0}
+    monkeypatch.setattr(app_module, "scan_boards", fake_scan)
+    monkeypatch.delenv("CRON_SECRET", raising=False)
+    r = client.get("/api/cron/rescan")
+    assert r.status_code == 200 and calls.get("ran") and r.json["pool_total"] == 14
+
+def test_cron_rescan_secret_guard(client, monkeypatch):
+    import app as app_module
+    monkeypatch.setattr(app_module, "scan_boards", lambda conn: {"pool_total": 0})
+    monkeypatch.setenv("CRON_SECRET", "s3cr3t")
+    assert client.get("/api/cron/rescan").status_code == 401
+    assert client.get("/api/cron/rescan", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    r = client.get("/api/cron/rescan", headers={"Authorization": "Bearer s3cr3t"})
+    assert r.status_code == 200
+
+# ---------------- v4: seeded feed penalty ----------------
+
+def test_feed_seeded_penalty():
+    cand = {"skills": ["Python"], "title": "Backend Developer", "target_titles": [], "locations": [], "remote_only": 0, "min_salary": 0}
+    real = _job(1, "Alpha Role", "ACo", 60); real["source"] = "remotive"
+    seed = _job(2, "Beta Role", "BCo", 60); seed["source"] = "seeded"
+    ranked = rank_jobs(cand, [seed, real])
+    assert ranked[0]["id"] == 1
+    seeded_item = [j for j in ranked if j["id"] == 2][0]
+    assert seeded_item["components"]["seeded_penalty"] == -15
+    assert ranked[0]["feed_score"] - seeded_item["feed_score"] == 15
+
+# ---------------- v4: new source normalizers ----------------
+
+def test_normalize_himalayas():
+    j = normalize_himalayas({"guid": "https://himalayas.app/companies/acme/jobs/dev-1", "title": "Python Developer",
+        "companyName": "Acme", "locationRestrictions": ["United States"], "categories": ["Software-Engineering"],
+        "description": "<p>Build Flask APIs with Python</p>", "applicationLink": "https://himalayas.app/apply/1",
+        "minSalary": 90000, "maxSalary": 120000, "currency": "USD", "salaryPeriod": "annual", "pubDate": 1794495804})
+    assert j["source"] == "himalayas" and j["title"] == "Python Developer" and j["company"] == "Acme"
+    assert j["salary_min"] == 90000 and j["salary_max"] == 120000 and j["remote"] == 1
+    assert j["url"] == "https://himalayas.app/apply/1" and "Python" in str(j["tags"])
+    assert j["posted_at"].startswith("20")
+
+WWR_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>WWR</title>
+<item><title>Acme Corp: Senior Python Developer</title><region>Anywhere in the World</region>
+<category>Full-Stack Programming</category><description>&lt;p&gt;Flask and SQL work&lt;/p&gt;</description>
+<pubDate>Mon, 10 Nov 2026 10:01:21 +0000</pubDate><guid>https://weworkremotely.com/remote-jobs/acme-1</guid>
+<link>https://weworkremotely.com/remote-jobs/acme-1</link></item>
+<item><title>Solo Title Role</title><region>Europe</region><category>Design</category>
+<description>React apps</description><pubDate>Tue, 11 Nov 2026 09:00:00 +0000</pubDate>
+<guid>https://weworkremotely.com/remote-jobs/solo-2</guid><link>https://weworkremotely.com/remote-jobs/solo-2</link></item>
+</channel></rss>"""
+
+def test_parse_wwr_feed():
+    jobs = parse_wwr_feed(WWR_RSS)
+    assert len(jobs) == 2
+    j = jobs[0]
+    assert j["source"] == "weworkremotely" and j["company"] == "Acme Corp" and j["title"] == "Senior Python Developer"
+    assert j["remote"] == 1 and j["location"] == "Anywhere in the World" and "Python" in str(j["tags"])
+    assert jobs[1]["title"] == "Solo Title Role" and jobs[1]["company"] == ""
+
+def test_normalize_themuse_fixture():
+    j = normalize_themuse({"id": 42, "name": "Data Engineer", "company": {"name": "MuseCo"},
+        "locations": [{"name": "Remote"}], "contents": "<p>Python and SQL pipelines</p>",
+        "refs": {"landing_page": "https://themuse.example/42"}, "publication_date": "2026-11-10T00:00:00Z"})
+    assert j["source"] == "themuse" and j["company"] == "MuseCo" and j["remote"] == 1 and "Python" in str(j["tags"])

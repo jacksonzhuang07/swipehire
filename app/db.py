@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS employer_swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,employer_id INTEGER NOT NULL,job_id INTEGER NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,job_id));
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,match_id INTEGER NOT NULL,sender TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS documents(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,doc_type TEXT NOT NULL DEFAULT 'other',title TEXT DEFAULT '',filename TEXT DEFAULT '',text TEXT DEFAULT '',facts TEXT DEFAULT '{}',created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS login_codes(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL,code_hash TEXT NOT NULL,attempts INTEGER DEFAULT 0,used INTEGER DEFAULT 0,expires_at TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')));
 """
 
 # Columns added in v2 — also applied to pre-existing v1 databases.

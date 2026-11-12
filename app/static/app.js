@@ -14,8 +14,39 @@ function avatarHTML(person, cls) {
 
 // ---------- auth ----------
 function authTab(t) {
-  $('tab-login').classList.toggle('active', t === 'login'); $('tab-signup').classList.toggle('active', t === 'signup');
-  $('auth-login').classList.toggle('hidden', t !== 'login'); $('auth-signup').classList.toggle('hidden', t !== 'signup');
+  for (const k of ['login', 'signup', 'code']) {
+    $('tab-' + k).classList.toggle('active', t === k);
+    $('auth-' + k).classList.toggle('hidden', t !== k);
+  }
+  $('auth-error').textContent = '';
+}
+function resetCodeFlow() {
+  $('code-step1').classList.remove('hidden'); $('code-step2').classList.add('hidden');
+  $('code-demo').classList.add('hidden'); $('code-msg').textContent = ''; $('code-value').value = '';
+}
+async function requestCode() {
+  const email = $('code-email').value.trim();
+  if (!email) { $('code-msg').textContent = 'Enter your email first.'; return; }
+  $('code-msg').textContent = 'Sending…';
+  const r = await POST('/api/auth/code/request', { email: email });
+  if (r.status === 429) { $('code-msg').textContent = (r.json && r.json.error) || 'Too many requests — wait a few minutes.'; return; }
+  if (r.status !== 200) { $('code-msg').textContent = (r.json && r.json.error) || 'Could not send a code.'; return; }
+  $('code-step1').classList.add('hidden'); $('code-step2').classList.remove('hidden');
+  if (r.json.demo_code) {
+    const box = $('code-demo');
+    box.innerHTML = `🧪 <b>Demo mode:</b> no email service is connected yet, so no email was sent. Your code is <b class="demo-code">${esc(r.json.demo_code)}</b>`;
+    box.classList.remove('hidden');
+    $('code-msg').textContent = 'Demo mode — copy the code from the yellow box above.';
+  } else {
+    $('code-demo').classList.add('hidden');
+    $('code-msg').textContent = r.json.message || 'Check your email for the code.';
+  }
+  $('code-value').focus();
+}
+async function verifyCode() {
+  const r = await POST('/api/auth/code/verify', { email: $('code-email').value.trim(), code: $('code-value').value.trim(), role: $('code-role').value });
+  if (r.status !== 200 && r.status !== 201) { $('code-msg').textContent = (r.json && r.json.error) || 'That code did not work — codes expire in 10 minutes and work once.'; return; }
+  boot(r.json.user);
 }
 async function doLogin() {
   const r = await POST('/api/auth/login', { email: $('li-email').value, password: $('li-pass').value });

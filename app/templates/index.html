@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SwipeHire — Swipe right. Get hired.</title><link rel="stylesheet" href="/static/style.css?v=3"></head>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SwipeHire — Swipe right. Get hired.</title><link rel="stylesheet" href="/static/style.css?v=4"></head>
 <body>
 <header><div class="logo">💘 SwipeHire</div><div id="user-box"></div></header>
 <main>
@@ -6,7 +6,7 @@
 <section id="auth-screen">
  <div class="hero"><h1>Swipe right. We apply for you.</h1><p>Upload your resume and supporting documents — SwipeHire compiles one Master Profile, ranks jobs on a For You feed built from your preferences and your swipes, and tailors a truthful resume (facts only, gaps listed) for every right-swipe. Employers swipe on candidates too — a mutual right-swipe is a Match.</p></div>
  <div class="auth-card">
-  <div class="tabs"><button id="tab-login" class="active" onclick="authTab('login')">Log in</button><button id="tab-signup" onclick="authTab('signup')">Sign up</button></div>
+  <div class="tabs"><button id="tab-login" class="active" onclick="authTab('login')">Log in</button><button id="tab-signup" onclick="authTab('signup')">Sign up</button><button id="tab-code" onclick="authTab('code')">✉️ Email code</button></div>
   <div id="auth-login">
    <label>Email <input id="li-email" type="email"></label><label>Password <input id="li-pass" type="password"></label>
    <button class="big" onclick="doLogin()">Log in</button>
@@ -20,6 +20,21 @@
    <label>Full name <input id="su-name"></label><label>Company (employers) <input id="su-company"></label>
    <label>Email <input id="su-email" type="email"></label><label>Password <input id="su-pass" type="password"></label>
    <button class="big" onclick="doSignup()">Create account</button>
+  </div>
+  <div id="auth-code" class="hidden">
+   <p class="hint">No password needed — we email you a 6-digit sign-in code. New here? The code creates your account.</p>
+   <div id="code-step1">
+    <label>Email <input id="code-email" type="email" placeholder="you@example.com"></label>
+    <button class="big" onclick="requestCode()">Email me a sign-in code</button>
+   </div>
+   <div id="code-demo" class="demo-code-box hidden"></div>
+   <div id="code-step2" class="hidden">
+    <label>6-digit code <input id="code-value" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
+    <label id="code-role-row">New to SwipeHire? (only used if this email has no account yet) I am a <select id="code-role"><option value="candidate">Candidate</option><option value="employer">Employer</option></select></label>
+    <button class="big" onclick="verifyCode()">Verify &amp; sign in</button>
+    <p class="hint">Code expires in 10 minutes and works once. <a href="#" onclick="resetCodeFlow();return false;">Use a different email</a></p>
+   </div>
+   <p id="code-msg" class="hint"></p>
   </div>
   <p id="auth-error" class="error"></p>
  </div>
@@ -70,4 +85,4 @@
 <div id="modal" class="hidden"><div class="modal-box"><button class="modal-close" onclick="closeModal()">✕</button><div id="modal-content"></div></div></div>
 <div id="match-overlay" class="hidden"><h2>It's a Match!</h2><p>You and <b id="match-title"></b> like each other</p><p id="match-sub"></p><div class="match-avatars" id="match-avatars"></div><div class="match-btns"><button class="match-send" onclick="closeMatch(true)">Send a message</button><button class="match-keep" onclick="closeMatch(false)">Keep swiping</button></div></div>
 <script>var jacksonEmail = "";</script>
-<script src="/static/app.js?v=3"></script></body></html>
+<script src="/static/app.js?v=4"></script></body></html>

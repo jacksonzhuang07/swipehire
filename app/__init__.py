@@ -1,8 +1,10 @@
-import os, json, uuid, functools
+import os, json, uuid, functools, secrets
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template, g, session, send_from_directory, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from .db import init_db, get_conn, row_to_dict, get_db_path, get_uploads_dir
+from .mailer import send_signin_code
 from .resume_parser import parse_resume, extract_text_from_pdf
 from .scoring import score_job
 from .job_sources import scan_boards, insert_jobs
@@ -98,14 +100,7 @@ def create_app(db_path=None, testing=False):
         c.pop("compiled_resume", None)
         return c
 
-    def _create_user_account(email, password, role, name, company=""):
-        email = (email or "").strip().lower()
-        if not email or "@" not in email:
-            return None, (jsonify({"error": "valid email required"}), 400)
-        if not password or len(password) < 4:
-            return None, (jsonify({"error": "password too short (min 4)"}), 400)
-        if db().execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
-            return None, (jsonify({"error": "email already registered"}), 409)
+    def _insert_user(email, password_hash, role, name, company=""):
         cand_id = emp_id = None
         if role == "candidate":
             cur = db().execute("INSERT INTO candidates(name,email) VALUES(?,?)", (name or email.split("@")[0], email))
@@ -114,9 +109,24 @@ def create_app(db_path=None, testing=False):
             cur = db().execute("INSERT INTO employers(name,company,email) VALUES(?,?,?)", (name or "Hiring Manager", company or "My Company", email))
             emp_id = cur.lastrowid
         cur = db().execute("INSERT INTO users(email,password_hash,role,name,candidate_id,employer_id) VALUES(?,?,?,?,?,?)",
-                           (email, generate_password_hash(password), role, name or "", cand_id, emp_id))
+                           (email, password_hash, role, name or "", cand_id, emp_id))
+        uid = cur.lastrowid
+        if cand_id:
+            db().execute("UPDATE candidates SET user_id=? WHERE id=?", (uid, cand_id))
+        if emp_id:
+            db().execute("UPDATE employers SET user_id=? WHERE id=?", (uid, emp_id))
         db().commit()
-        return cur.lastrowid, None
+        return uid
+
+    def _create_user_account(email, password, role, name, company=""):
+        email = (email or "").strip().lower()
+        if not email or "@" not in email:
+            return None, (jsonify({"error": "valid email required"}), 400)
+        if not password or len(password) < 4:
+            return None, (jsonify({"error": "password too short (min 4)"}), 400)
+        if db().execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
+            return None, (jsonify({"error": "email already registered"}), 409)
+        return _insert_user(email, generate_password_hash(password), role, name, company), None
 
     # ---------- pages / health ----------
     @app.route("/")
@@ -125,7 +135,7 @@ def create_app(db_path=None, testing=False):
 
     @app.route("/api/health")
     def health():
-        return jsonify({"ok": True, "app": "SwipeHire", "version": 2})
+        return jsonify({"ok": True, "app": "SwipeHire", "version": 4})
 
     @app.route("/uploads/<path:filename>")
     @login_required()
@@ -159,6 +169,77 @@ def create_app(db_path=None, testing=False):
     def logout():
         session.clear()
         return jsonify({"ok": True})
+
+    # ---------- passwordless email-code sign-in ----------
+    CODE_TTL_MIN = 10
+    CODE_MAX_ATTEMPTS = 5
+    CODE_RATE_LIMIT = 3        # code requests ...
+    CODE_RATE_WINDOW_MIN = 15  # ... per email per this many minutes
+
+    @app.route("/api/auth/code/request", methods=["POST"])
+    def code_request():
+        d = request.get_json(force=True, silent=True) or {}
+        email = (d.get("email") or "").strip().lower()
+        if not email or "@" not in email or "." not in email.split("@")[-1]:
+            return jsonify({"error": "valid email required"}), 400
+        recent = db().execute("SELECT COUNT(*) c FROM login_codes WHERE email=? AND created_at >= datetime('now', ?)",
+                              (email, f"-{CODE_RATE_WINDOW_MIN} minutes")).fetchone()["c"]
+        if recent >= CODE_RATE_LIMIT:
+            return jsonify({"error": "Too many code requests for this email — please wait a few minutes and try again."}), 429
+        code = f"{secrets.randbelow(1000000):06d}"
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=CODE_TTL_MIN)).isoformat()
+        db().execute("INSERT INTO login_codes(email,code_hash,expires_at) VALUES(?,?,?)",
+                     (email, generate_password_hash(code), expires))
+        db().commit()
+        # Delivery is identical whether or not an account exists (no existence leak).
+        mode, delivered = send_signin_code(email, code)
+        resp = {"ok": True,
+                "message": "If an account exists for that email, a 6-digit sign-in code is on its way. It expires in 10 minutes.",
+                "mail_mode": mode, "delivered": delivered}
+        if mode == "demo":
+            resp["demo_code"] = code
+            resp["demo_note"] = "Demo mode: no email service connected yet, so here is your code."
+        app.logger.info("sign-in code requested for %s via %s (delivered=%s)", email, mode, delivered)
+        return jsonify(resp)
+
+    @app.route("/api/auth/code/verify", methods=["POST"])
+    def code_verify():
+        d = request.get_json(force=True, silent=True) or {}
+        email = (d.get("email") or "").strip().lower()
+        code = str(d.get("code") or "").strip()
+        generic = (jsonify({"error": "invalid or expired code"}), 401)
+        if not email or not code:
+            return generic
+        row = db().execute("SELECT * FROM login_codes WHERE email=? AND used=0 ORDER BY id DESC LIMIT 1", (email,)).fetchone()
+        if not row:
+            return generic
+        try:
+            exp = datetime.fromisoformat(row["expires_at"])
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+        except Exception:
+            return generic
+        if datetime.now(timezone.utc) > exp or row["attempts"] >= CODE_MAX_ATTEMPTS:
+            return generic
+        if not check_password_hash(row["code_hash"], code):
+            db().execute("UPDATE login_codes SET attempts=attempts+1 WHERE id=?", (row["id"],))
+            db().commit()
+            return generic
+        db().execute("UPDATE login_codes SET used=1 WHERE id=?", (row["id"],))
+        db().commit()
+        user = db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        created = False
+        if not user:
+            role = d.get("role") if d.get("role") in ("candidate", "employer") else "candidate"
+            name = (d.get("name") or "").strip() or email.split("@")[0]
+            # Unusable random password: the account is code-login only until the user sets one.
+            uid = _insert_user(email, generate_password_hash(secrets.token_urlsafe(32)), role, name, d.get("company", ""))
+            created = True
+        else:
+            uid = user["id"]
+        session["user_id"] = uid
+        payload = _me_payload()
+        return jsonify({"user": payload, "created": created}), (201 if created else 200)
 
     def _me_payload():
         u = current_user()
@@ -356,6 +437,16 @@ def create_app(db_path=None, testing=False):
     @app.route("/api/jobs/scan", methods=["POST"])
     @login_required()
     def scan():
+        return jsonify(scan_boards(db()))
+
+    @app.route("/api/cron/rescan", methods=["GET"])
+    def cron_rescan():
+        """Daily Vercel Cron target: refresh the shared job pool.
+        Guarded by CRON_SECRET when set (Vercel Cron sends it as
+        Authorization: Bearer <CRON_SECRET>); open in demo when unset."""
+        secret = os.environ.get("CRON_SECRET")
+        if secret and request.headers.get("Authorization", "") != f"Bearer {secret}":
+            return jsonify({"error": "unauthorized"}), 401
         return jsonify(scan_boards(db()))
 
     @app.route("/api/discovery")

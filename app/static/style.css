@@ -81,6 +81,14 @@ main { max-width: 980px; margin: 0 auto; padding: 10px 16px 30px; width: 100%; }
 .auth-card button.big { width: 100%; font-size: 17px; padding: 13px; margin-top: 4px; }
 .auth-card .hint { text-align: center; }
 .auth-card #auth-login > button:not(.big) { margin: 3px 2px; }
+.auth-card .tabs button { white-space: nowrap; padding: 10px 8px; font-size: 14px; }
+.demo-code-box {
+  background: #fff8db; border: 1.5px dashed #e6c619; color: #6b5900;
+  border-radius: 12px; padding: 12px 14px; margin: 12px 0; font-size: 15px; line-height: 1.5;
+}
+.demo-code-box .demo-code { font-size: 22px; letter-spacing: .18em; color: var(--ink); }
+#code-value { font-size: 22px; letter-spacing: .35em; text-align: center; font-weight: 800; }
+#code-msg { min-height: 20px; }
 .error { color: var(--red); min-height: 20px; font-weight: 600; }
 .hint { color: var(--grey); font-size: 14px; line-height: 1.5; }
 p.hint { margin: 10px 0; }

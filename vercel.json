@@ -1,1 +1,1 @@
-{"$schema":"https://openapi.vercel.sh/vercel.json","rewrites":[{"destination":"/api/index.py","source":"/(.*)"}]}
+{"$schema":"https://openapi.vercel.sh/vercel.json","crons":[{"path":"/api/cron/rescan","schedule":"0 6 * * *"}],"rewrites":[{"destination":"/api/index.py","source":"/(.*)"}]}

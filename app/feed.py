@@ -116,7 +116,11 @@ def rank_jobs(candidate, jobs, right_jobs=(), left_jobs=()):
         pref, pref_reasons = preference_fit(candidate, j, j.get("breakdown", {}))
         learn, learn_reasons = _learned(j, right, left)
         fresh, fresh_reason = _freshness(j)
-        feed_score = round(j.get("score", 0) * 0.7 + pref + learn + fresh, 1)
+        # Real-source jobs outrank the curated seeded fallback when comparable:
+        # seeded jobs take a flat penalty so they surface only when real
+        # inventory runs thin (their source is labelled on the card).
+        seeded_penalty = -15 if j.get("source") == "seeded" else 0
+        feed_score = round(j.get("score", 0) * 0.7 + pref + learn + fresh + seeded_penalty, 1)
         why = []
         if j.get("matched_skills"):
             why.append(f"Matches {len(j['matched_skills'])} of your skills: {', '.join(j['matched_skills'][:3])}")
@@ -128,7 +132,7 @@ def rank_jobs(candidate, jobs, right_jobs=(), left_jobs=()):
             why.append(f"Match score {j.get('score', 0)}/100 against your profile")
         item = dict(j)
         item.update({"feed_score": feed_score, "why": why[:3], "is_stretch": False,
-                     "components": {"base": j.get("score", 0), "preference": pref, "learned": round(learn, 1), "freshness": fresh}})
+                     "components": {"base": j.get("score", 0), "preference": pref, "learned": round(learn, 1), "freshness": fresh, "seeded_penalty": seeded_penalty}})
         items.append(item)
     items.sort(key=lambda x: -x["feed_score"])
     # Diversity pass: at most 2 per company and 2 per near-identical title in the first 10.

@@ -8,6 +8,24 @@ cd ~/workspace/swipehire
 ```
 Deploy: import the GitHub repo into Vercel (Hobby/free) — `vercel.json` → `api/index.py` serves the Flask app; runtime deps in `api/requirements.txt`.
 
+## v4 — passwordless email-code sign-in + bigger live pool (2026-11-12)
+
+**A. Email-code sign-in** (added *alongside* password login + demo logins; nothing removed)
+- Third auth tab “✉️ Email code”: enter email → `POST /api/auth/code/request` → 6-digit code → `POST /api/auth/code/verify` (email + code + optional role/name/company, used only when the email has no account yet; default role candidate) → account created on first verify, session logged in via the existing Flask session.
+- Codes: only a werkzeug **hash** is stored (`login_codes` table), **10-minute expiry, single-use, max 5 attempts**, rate limit **3 requests per email per 15 min** (429 after). Request responses are generic — identical shape whether or not the account exists, so existence isn't leaked. Verify failures are one generic 401.
+- Delivery is pluggable (`app/mailer.py`): `RESEND_API_KEY` → Resend API (From `SWIPEHIRE_MAIL_FROM` or onboarding@resend.dev); else `SMTP_HOST/PORT/USER/PASS` → smtplib; else **DEMO MODE — no email is sent**: the code is returned in the API response and shown on the auth screen in a clearly-labelled dashed-yellow demo box (“Demo mode: no email service is connected yet, so no email was sent. Your code is …”) and logged server-side. Code-created accounts get an unusable random password hash (code-login only until a password flow exists). Test hook: `SWIPEHIRE_MAIL_CAPTURE=1` captures mail into `mailer.LAST_SENT`.
+- Google sign-in was **not** built (needs a Google Cloud OAuth project + client-secret provisioning by Jackson).
+
+**B. More actual jobs**
+- Source probing (live, 2026-11-12): **Himalayas** `himalayas.app/jobs/api` — 200 JSON, kept. **We Work Remotely** RSS (root + programming/devops/product/design category feeds, parsed with stdlib `xml.etree`) — 200, kept. **The Muse** — www API endpoints 404, `api-v2` Cloudflare 403: **dead for no-key use**; normalizer + fetcher kept behind `SWIPEHIRE_ENABLE_MUSE=1`, excluded from the default scan. **Working Nomads** — `/api/exposed/jobs/` and `/jobs.json` both 404: no working public endpoint found, no fetcher.
+- **Fresh live scan on an empty DB (2026-11-12): pool_total 727** (was 462 in v2) — arbeitnow 284, weworkremotely 167, himalayas 100 (5 cursor pages × 20), remoteok 98, jobicy 50, remotive 14, seeded 14. The long-running local DB (accumulated since v2) measures 758.
+- Feed: `seeded` fallback jobs take a **−15 feed-score penalty** (`components.seeded_penalty`), so real-source jobs outrank them at comparable scores; seeded cards remain source-labelled.
+- Auto-refresh: `vercel.json` now declares a **daily Vercel Cron** (`0 6 * * *`) → `GET /api/cron/rescan`, which runs a full scan of the shared pool; guarded by `CRON_SECRET` (Vercel sends `Authorization: Bearer …`) when set, open in demo when unset. Verified live on :5050 (200, all sources ok, pool_total 758) and in tests (mocked scan + secret guard).
+
+**Tests — 53 passed in 48.43s, one clean final pass** (37 v3 + 16 v4): code happy path (existing user), code signup creating candidate + employer accounts, generic response for unknown email, wrong code rejected then correct accepted, **single-use**, **5-attempt cap burns the code**, **expired code rejected**, **hash-only storage**, **rate limit** (3 ok → 429, other email unaffected), password login untouched by code flow, cron endpoint with mocked sources, cron secret guard (401/no + wrong, 200/correct), seeded-penalty ordering (exactly 15 points, real job first), Himalayas + WWR-RSS + The Muse fixture normalizers. The 2 layout tests ran and passed (not skipped).
+
+**Visual QA (gate applied):** `visual-qa/qa.py` extended with an auth pass — screenshots `v4-auth-{1920x1080,390x844}.png`, `v4-auth-code-{1920x1080,390x844}.png` (exercises the real code-request UI; demo box measurably visible at both widths), `v4-discovery-{1920x1080,1366x768,390x844}.png`, `v4-documents-1920x1080.png`, `v4-employer-1920x1080.png`. The developer read the auth, code-entry (desktop + mobile), and discovery shots personally: three auth tabs fit without squeeze, demo box is unmistakable, code input is large/centred, no overflow anywhere (scrollWidth == innerWidth at all widths; card 520px/370px; card ∩ nav = ∅; why-ratio 0.90–0.93). Assets bumped to `?v=4`. Vercel entrypoint re-verified (`VERCEL=1`: health version 4, home 200, code request 200 in demo mode). Local server on :5050 restarted with v4 and left running.
+
 ## v3 — Tinder-style UI + visual QA (2026-11-12)
 
 **What Jackson saw:** a screenshot of the live v2 Discovery page where the job card rendered as scattered, overlapping pieces (badges stacked, text spilling past the nav, skill chips in a narrow column, the "Why this job" box squeezed to ~150px).
