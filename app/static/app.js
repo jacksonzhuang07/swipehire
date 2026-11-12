@@ -83,7 +83,7 @@ function boot(user) {
   ME = user;
   $('auth-screen').classList.add('hidden'); $('app-screen').classList.remove('hidden');
   const person = user.role === 'candidate' ? user.candidate : user.employer;
-  $('user-box').innerHTML = `${avatarHTML(person || {}, 'small')} <span>${esc(user.name || user.email)} · ${esc(user.role)}</span> <button onclick="doLogout()">Log out</button>`;
+  $('user-box').innerHTML = `${avatarHTML(person || {}, 'small')} <span>${esc(user.name || user.email)} · ${esc(user.role)}</span>${person && person.plan === 'pro' ? ' <span class="pro-badge">💎 PRO</span>' : ''} <button onclick="showView('pricing')">💎 Pricing</button> <button onclick="doLogout()">Log out</button>`;
   const nav = user.role === 'candidate'
     ? `<button data-view="discovery" onclick="showView('discovery')"><span class="nav-ic">🔥</span><span>For You</span></button><button data-view="applications" onclick="showView('applications')"><span class="nav-ic">📨</span><span>Applications</span></button><button data-view="documents" onclick="showView('documents')"><span class="nav-ic">🗂️</span><span>Documents</span></button><button data-view="profile" onclick="showView('profile')"><span class="nav-ic">👤</span><span>Profile</span></button><button data-view="connections" onclick="showView('connections')"><span class="nav-ic">🔌</span><span>Connections</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`
     : `<button data-view="employer" onclick="showView('employer')"><span class="nav-ic">🔥</span><span>Employer</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`;
@@ -99,6 +99,7 @@ function showView(v) {
   if (v === 'documents') loadDocuments();
   if (v === 'profile') loadProfile();
   if (v === 'employer') loadEmployer();
+  if (v === 'pricing') renderPricing();
   if (v === 'matches') loadMatches();
   if (v === 'connections') loadConnections();
 }
@@ -111,7 +112,7 @@ function badgesHTML(scoreLabel, feedScore, isStretch) {
 function cardHTML(j) {
   const initial = esc((j.company || '?').trim().charAt(0).toUpperCase() || '?');
   const ml = modeLabel(j);
-  return `<div class="card job-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero${j.media_url ? ' photo' : ''}"><div class="segments"><i></i></div>${badgesHTML(j.score + '% match', j.feed_score, j.is_stretch)}${heroMediaHTML(j.media_url, j.media_type, initial)}<div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div><div class="card-body"><p class="meta-line">${j.requires_login ? '<span class="lock-badge">🔒 Login required</span>' : ''}<span>📍 ${esc(j.location || 'Unspecified')}</span>${ml ? `<span class="chip">${ml}</span>` : ''}${j.salary_text ? `<span class="salary">${esc(j.salary_text)}</span>` : ''}<span>Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></p><p class="desc">${esc((j.description || '').slice(0, 400))}</p><div class="chips">${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a class="apply-link" href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div></div>`;
+  return `<div class="card job-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero${j.media_url ? ' photo' : ''}"><div class="segments"><i></i></div>${badgesHTML(j.score + '% match', j.feed_score, j.is_stretch)}${heroMediaHTML(j.media_url, j.media_type, initial)}<div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div><div class="card-body"><p class="meta-line">${j.requires_login ? '<span class="lock-badge">🔒 Login required</span>' : ''}${j.sponsored ? '<span class="chip sponsored-chip">⭐ Sponsored</span>' : ''}<span>📍 ${esc(j.location || 'Unspecified')}</span>${ml ? `<span class="chip">${ml}</span>` : ''}${j.salary_text ? `<span class="salary">${esc(j.salary_text)}</span>` : ''}<span>Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></p><p class="desc">${esc((j.description || '').slice(0, 400))}</p><div class="chips">${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a class="apply-link" href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div></div>`;
 }
 function recruiterCardHTML(r) {
   const initial = esc((r.company || '?').trim().charAt(0).toUpperCase() || '?');
@@ -265,8 +266,9 @@ function downloadCompiled(fmt) { window.open('/api/compiled-resume/download?form
 
 // ---------- profile ----------
 async function loadProfile() {
+  renderBoost();
   const me = await apiJ('/api/auth/me'); ME = me; const c = me.candidate || {};
-  $('profile-card').innerHTML = `<div class="card"><div class="profile-head">${avatarHTML(c, 'large')}<div><h3>${esc(c.name || '')}</h3><p>${esc(c.title || '')} · ${esc(c.email || '')}</p><p>${esc(c.summary || '')}</p><div>${(c.skills || []).map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div></div></div></div>`;
+  $('profile-card').innerHTML = `<div class="card"><div class="profile-head">${avatarHTML(c, 'large')}<div><h3>${esc(c.name || '')} ${c.plan === 'pro' ? '<span class="pro-badge">💎 PRO</span>' : ''}</h3><p>${esc(c.title || '')} · ${esc(c.email || '')}</p><p>${esc(c.summary || '')}</p><div>${(c.skills || []).map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div></div></div></div>`;
   $('pref-titles').value = (c.target_titles || []).join(', '); $('pref-locs').value = (c.locations || []).join(', ');
   $('pref-salary').value = c.min_salary || ''; $('pref-remote').checked = !!c.remote_only;
 }
@@ -292,10 +294,11 @@ async function savePrefs() {
 // ---------- employer ----------
 async function loadEmployer() {
   const me = await apiJ('/api/auth/me'); ME = me; const e = me.employer || {};
-  $('emp-profile').innerHTML = `<div class="card"><div class="profile-head">${avatarHTML(e, 'large')}<div><h3>${esc(e.company || '')}</h3><p>${esc(e.name || '')} · ${esc(e.email || '')}</p><p><span class="likes-pill">♥ ${e.likes_count || 0} recruiter-profile like${e.likes_count === 1 ? '' : 's'}</span></p></div></div></div>`;
+  $('emp-profile').innerHTML = `<div class="card"><div class="profile-head">${avatarHTML(e, 'large')}<div><h3>${esc(e.company || '')} ${e.plan === 'pro' ? '<span class="pro-badge">💎 PRO</span>' : ''}</h3><p>${esc(e.name || '')} · ${esc(e.email || '')}</p><p><span class="likes-pill">♥ ${e.likes_count || 0} recruiter-profile like${e.likes_count === 1 ? '' : 's'}</span></p></div></div></div>`;
   $('emp-media-status').textContent = e.has_media ? '✅ Recruiter media on file — your jobs inherit it.' : '⚠️ No recruiter media yet: a picture or video is required before a job can be published without media attached to the job itself.';
   const jobs = await apiJ('/api/employer/jobs') || [];
-  $('my-jobs').innerHTML = '<h4>My jobs</h4>' + (jobs.length ? jobs.map(j => `<p>• ${esc(j.title)} — ${esc(j.location || '')} ${modeLabel(j)} (${esc(j.source)}) <span class="likes-pill">♥ ${j.likes_count || 0}</span></p>`).join('') : '<p class="meta">None yet.</p>');
+  EMP_JOBS = jobs;
+  $('my-jobs').innerHTML = '<h4>My jobs</h4>' + (jobs.length ? jobs.map(j => `<p>• ${esc(j.title)} — ${esc(j.location || '')} ${modeLabel(j)} (${esc(j.source)}) <span class="likes-pill">♥ ${j.likes_count || 0}</span> ${j.sponsored ? '<span class="chip sponsored-chip">⭐ Sponsored</span>' : ''} <button class="mini" onclick="toggleSponsor(${j.id})">${j.sponsored ? 'Unsponsor' : '⭐ Sponsor'}</button> <button class="mini" onclick="showJobLikers(${j.id})">Who liked this</button></p><div id="job-likers-${j.id}"></div>`).join('') : '<p class="meta">None yet.</p>');
   $('emp-job-select').innerHTML = jobs.map(j => `<option value="${j.id}">${esc(j.title)} (♥ ${j.likes_count || 0})</option>`).join('');
   loadEmpDeck();
 }
@@ -420,7 +423,82 @@ async function deleteAccount() {
 }
 
 // ---------- matches ----------
+/* ---------- Phase 2: pricing, reveals, sponsored, boost ---------- */
+let EMP_JOBS = [];
+async function renderPricing() {
+  const data = await apiJ('/api/billing/plans');
+  if (!data) { $('pricing-plans').innerHTML = '<p>Could not load plans.</p>'; return; }
+  const mine = ME ? (ME.role === 'candidate' ? 'candidate_pro' : 'recruiter_pro') : null;
+  const isPro = key => (key === 'candidate_pro' && ME && ME.candidate && ME.candidate.plan === 'pro') || (key === 'recruiter_pro' && ME && ME.employer && ME.employer.plan === 'pro');
+  $('pricing-plans').innerHTML = data.plans.map(p => `<div class="card plan-card${p.key === mine ? ' mine' : ''}"><h3>${esc(p.name)} ${isPro(p.key) ? '<span class="pro-badge">💎 Current plan</span>' : ''}</h3><p class="plan-price">$${p.price}<span>/${esc(p.period)}</span></p><p>${esc(p.tagline)}</p><ul>${p.features.map(f => `<li>${esc(f)}</li>`).join('')}</ul>${isPro(p.key) ? '' : `<button onclick="startCheckout('${p.key}')">Upgrade — $${p.price}/${esc(p.period)}</button>`}</div>`).join('');
+  $('pricing-note').innerHTML = data.payments_configured ? '' : '<p class="hint">Payments are launching soon — upgrade buttons join the waitlist for now. No card is charged.</p>';
+}
+async function startCheckout(key) {
+  if (!ME) { alert('Log in first, then upgrade.'); return; }
+  const r = await POST('/api/billing/checkout', { plan: key });
+  if (r.status === 503 && r.json && r.json.error === 'payments_not_configured') {
+    $('pricing-note').innerHTML = `<div class="card"><p>💳 Payments are launching soon.</p><p class="hint">${esc(r.json.message || '')}</p><button onclick="joinWaitlist('${key}')">Join the waitlist</button></div>`;
+  } else if (r.json && r.json.checkout_url) { location.href = r.json.checkout_url; }
+  else alert((r.json && (r.json.message || r.json.error)) || 'Checkout unavailable right now.');
+}
+async function joinWaitlist(key) {
+  const r = await POST('/api/billing/interest', { plan: key });
+  if (r.status === 201) $('pricing-note').innerHTML = '<div class="card"><p>✓ You\'re on the list — we\'ll email you when payments launch.</p></div>';
+  else alert('Could not join the waitlist — try again.');
+}
+async function loadLikers() {
+  const box = $('likers-box');
+  if (!ME || ME.role !== 'candidate') { box.innerHTML = ''; return; }
+  const likes = await apiJ('/api/me/likes');
+  const n = likes ? likes.likes : 0;
+  if (!n) { box.innerHTML = '<div class="card"><h3>♥ Who liked you</h3><p class="meta">No likes yet — recruiters who right-swipe you appear here.</p></div>'; return; }
+  const r = await api('/api/me/likers');
+  if (r.status === 402) {
+    const dots = Array.from({ length: Math.min(n, 6) }, () => '<span class="blur-avatar"></span>').join('');
+    box.innerHTML = `<div class="card"><h3>♥ ${n} like${n === 1 ? '' : 's'}</h3><div class="blur-row">${dots}</div><p class="meta">See WHO liked you with Candidate Pro.</p><button onclick="showView('pricing')">💎 See who liked you — Pro</button></div>`;
+    return;
+  }
+  const likers = (r.json && r.json.likers) || [];
+  box.innerHTML = `<div class="card"><h3>♥ Who liked you</h3>${likers.map(l => `<div class="match-row">${avatarHTML({ video_url: l.media_type === 'video' ? l.media_url : '', photo_url: l.media_type === 'image' ? l.media_url : '', name: l.company }, 'small')}<div><b>${esc(l.company)}</b><p class="meta">${esc(l.name || '')} liked you for ${esc(l.job_title)}</p></div></div>`).join('')}</div>`;
+}
+async function renderBoost() {
+  const box = $('boost-box');
+  const me = await apiJ('/api/auth/me'); if (me) ME = me;
+  const c = (me && me.candidate) || {};
+  if (c.plan !== 'pro') {
+    box.innerHTML = '<div class="card"><h3>⚡ Boost</h3><p>Rank ahead in employer decks for 24 hours. A Candidate Pro mechanic — visibility order only, never match eligibility.</p><button onclick="showView(\'pricing\')">💎 Boost with Pro</button></div>';
+  } else if (c.boost_active) {
+    box.innerHTML = `<div class="card"><h3>⚡ Boost active</h3><p>You're ranking ahead in employer decks until ${esc(c.boost_until)} UTC.</p></div>`;
+  } else {
+    box.innerHTML = '<div class="card"><h3>⚡ Boost</h3><p>Rank ahead in employer decks for the next 24 hours.</p><button onclick="activateBoost()">Activate 24h Boost</button></div>';
+  }
+}
+async function activateBoost() {
+  const r = await POST('/api/me/boost', {});
+  if (r.status === 402) { showView('pricing'); return; }
+  if (r.status !== 200) { alert('Could not activate Boost.'); return; }
+  renderBoost();
+}
+async function toggleSponsor(jobId) {
+  const j = EMP_JOBS.find(x => x.id === jobId); if (!j) return;
+  const r = await POST(`/api/employer/jobs/${jobId}/sponsor`, { active: !j.sponsored });
+  if (r.status === 402) { alert('Sponsoring is a Recruiter Pro feature — see Pricing.'); showView('pricing'); return; }
+  if (r.status !== 200) { alert((r.json && r.json.error) || 'Could not update sponsorship.'); return; }
+  loadEmployer();
+}
+async function showJobLikers(jobId) {
+  const el = $('job-likers-' + jobId); if (!el) return;
+  const r = await api(`/api/employer/jobs/${jobId}/likers`);
+  if (r.status === 402) {
+    el.innerHTML = '<p class="meta">🔒 Candidate identities are a Recruiter Pro reveal — counts stay free. <button class="mini" onclick="showView(\'pricing\')">💎 Upgrade</button></p>';
+    return;
+  }
+  const likers = (r.json && r.json.likers) || [];
+  el.innerHTML = likers.length ? likers.map(c => `<p>• ${esc(c.name)} — ${esc(c.title || '')}</p>`).join('') : '<p class="meta">No likes yet.</p>';
+}
+
 async function loadMatches() {
+  loadLikers();
   const ms = await apiJ('/api/matches') || [];
   $('matches').innerHTML = ms.length ? ms.map(m => `<div class="row"><div class="profile-head">${m.candidate_photo_url ? `<img class="avatar" src="${esc(m.candidate_photo_url)}">` : `<span class="avatar initials">${esc(initials(m.candidate_name))}</span>`}<div><b>${esc(m.candidate_name)}</b> × <b>${esc(m.job_title)}</b> @ ${esc(m.company)}</div></div><div><input id="msg-${m.id}" placeholder="Say hi…"><button onclick="sendMsg(${m.id})">Send</button><div id="msgs-${m.id}"></div></div></div>`).join('') : '<p>No matches yet. A match needs a mutual right-swipe.</p>';
   for (const m of ms) { const msgs = await apiJ(`/api/matches/${m.id}/messages`) || []; const el = $('msgs-' + m.id); if (el) el.innerHTML = msgs.map(x => `<p class="meta">${esc(x.sender)}: ${esc(x.body)}</p>`).join(''); }
