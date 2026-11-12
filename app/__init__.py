@@ -1,6 +1,6 @@
 import os, json, uuid, functools, secrets, sys
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, render_template, g, session, send_from_directory, Response
+from flask import Flask, request, jsonify, render_template, g, session, send_from_directory, Response, redirect
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from .db import init_db, get_conn, row_to_dict, get_db_path, get_uploads_dir
@@ -12,6 +12,7 @@ from .apply_engine import apply_for_job, maybe_create_match
 from .seed_data import seed_all
 from .documents import parse_document_facts, rebuild_master, DOC_TYPES
 from .feed import rank_jobs, rank_candidates_for_job
+from . import storage
 
 PHOTO_EXTS = {".png", ".jpg", ".jpeg"}
 DOC_EXTS = {".txt", ".md", ".pdf"}
@@ -103,7 +104,7 @@ def create_app(db_path=None, testing=False):
         if not c:
             return None
         c = dict(c)
-        c["photo_url"] = f"/uploads/{c['photo']}" if c.get("photo") else ""
+        c["photo_url"] = storage.display_url(c.get("photo"))
         c.pop("resume_text", None)
         c.pop("compiled_resume", None)
         return c
@@ -151,12 +152,21 @@ def create_app(db_path=None, testing=False):
 
     @app.route("/api/health")
     def health():
-        return jsonify({"ok": True, "app": "SwipeHire", "version": 6})
+        return jsonify({"ok": True, "app": "SwipeHire", "version": 7,
+                        "storage": storage.backend_name()})
 
     @app.route("/uploads/<path:filename>")
     @login_required()
     def uploads(filename):
-        return send_from_directory(app.config["UPLOADS_DIR"], os.path.basename(filename))
+        name = os.path.basename(filename)
+        # Blob backend: if the owning record carries a blob URL, hand the
+        # browser off to it; otherwise serve the local file as before.
+        for sql in ("SELECT photo_blob_url u FROM candidates WHERE photo=?",
+                    "SELECT logo_blob_url u FROM employers WHERE logo=?"):
+            r = db().execute(sql, (name,)).fetchone()
+            if r and r["u"]:
+                return redirect(r["u"])
+        return send_from_directory(app.config["UPLOADS_DIR"], name)
 
     # ---------- auth ----------
     @app.route("/api/auth/signup", methods=["POST"])
@@ -269,7 +279,7 @@ def create_app(db_path=None, testing=False):
             r = db().execute("SELECT * FROM employers WHERE id=?", (u["employer_id"],)).fetchone()
             e = row_to_dict(r)
             if e:
-                e["logo_url"] = f"/uploads/{e['logo']}" if e.get("logo") else ""
+                e["logo_url"] = storage.display_url(e.get("logo"))
             payload["employer"] = e
         return payload
 
@@ -355,12 +365,17 @@ def create_app(db_path=None, testing=False):
             return jsonify({"error": "image too large (max 3MB)"}), 413
         if not (data.startswith(b"\x89PNG") or data.startswith(b"\xff\xd8\xff")):
             return jsonify({"error": "file is not a real PNG/JPEG image"}), 400
+        blob_col = f"{column}_blob_url"
+        old = db().execute(f"SELECT {column}, {blob_col} FROM {table} WHERE id=?", (row_id,)).fetchone()
         name = f"{table}_{row_id}_{uuid.uuid4().hex[:10]}{ext}"
-        with open(os.path.join(app.config["UPLOADS_DIR"], name), "wb") as fh:
-            fh.write(data)
-        db().execute(f"UPDATE {table} SET {column}=? WHERE id=?", (name, row_id))
+        blob_url = storage.save_upload(app.config["UPLOADS_DIR"], name, data,
+                                       "image/png" if ext == ".png" else "image/jpeg")
+        db().execute(f"UPDATE {table} SET {column}=?, {blob_col}=? WHERE id=?", (name, blob_url or "", row_id))
         db().commit()
-        return jsonify({"ok": True, "url": f"/uploads/{name}", "filename": name})
+        if old and old[column] and old[column] != name:
+            # Replaced image: best-effort cleanup of the previous object.
+            storage.delete_upload(app.config["UPLOADS_DIR"], name=old[column], blob_url=old[blob_col])
+        return jsonify({"ok": True, "url": storage.display_url(name), "filename": name})
 
     @app.route("/api/candidate/preferences", methods=["POST"])
     @login_required("candidate")
@@ -549,6 +564,20 @@ def create_app(db_path=None, testing=False):
         u = g.user
         conn = db()
         cand_id, emp_id = u.get("candidate_id"), u.get("employer_id")
+        # Collect stored uploads (local name + blob URL) BEFORE the rows
+        # go, so the objects can be deleted too. Blob deletion is
+        # best-effort and never blocks the account deletion.
+        doomed_uploads = []
+        if cand_id:
+            r = conn.execute("SELECT photo, photo_blob_url FROM candidates WHERE id=?", (cand_id,)).fetchone()
+            if r and r["photo"]:
+                doomed_uploads.append((r["photo"], r["photo_blob_url"]))
+            doomed_uploads += [(None, r["blob_url"]) for r in
+                               conn.execute("SELECT blob_url FROM documents WHERE candidate_id=? AND blob_url != ''", (cand_id,)).fetchall()]
+        if emp_id:
+            r = conn.execute("SELECT logo, logo_blob_url FROM employers WHERE id=?", (emp_id,)).fetchone()
+            if r and r["logo"]:
+                doomed_uploads.append((r["logo"], r["logo_blob_url"]))
         match_ids = set()
         if cand_id:
             match_ids |= {r["id"] for r in conn.execute("SELECT id FROM matches WHERE candidate_id=?", (cand_id,)).fetchall()}
@@ -579,6 +608,8 @@ def create_app(db_path=None, testing=False):
         conn.execute("DELETE FROM login_codes WHERE email=?", (u["email"],))
         conn.execute("DELETE FROM users WHERE id=?", (u["id"],))
         conn.commit()
+        for name, blob_url in doomed_uploads:
+            storage.delete_upload(app.config["UPLOADS_DIR"], name=name, blob_url=blob_url)  # never raises
         session.clear()
         return jsonify({"ok": True, "deleted_user": u["email"]})
 
@@ -588,8 +619,21 @@ def create_app(db_path=None, testing=False):
         cur = db().execute("INSERT INTO documents(candidate_id,doc_type,title,filename,text,facts) VALUES(?,?,?,?,?,?)",
                            (candidate_id, doc_type, title or filename or doc_type, filename, text[:60000], json.dumps(facts)))
         db().commit()
+        did = cur.lastrowid
+        if storage.blob_enabled():
+            # Mirror the document bytes to Blob under an unguessable
+            # pathname so the file itself survives ephemeral disks too.
+            # Best-effort: the text in the DB is the source of truth, so
+            # a failed mirror never breaks the upload.
+            try:
+                blob_name = f"documents_{candidate_id}_{did}_{uuid.uuid4().hex[:10]}.txt"
+                url = storage.blob_put(blob_name, text[:60000].encode("utf-8"), "text/plain")
+                db().execute("UPDATE documents SET blob_url=? WHERE id=?", (url, did))
+                db().commit()
+            except Exception:
+                app.logger.warning("blob mirror failed for document %s", did, exc_info=True)
         rebuild_master(db(), candidate_id)
-        return cur.lastrowid
+        return did
 
     @app.route("/api/documents", methods=["GET", "POST"])
     @login_required("candidate")
@@ -623,11 +667,14 @@ def create_app(db_path=None, testing=False):
     @login_required("candidate")
     def delete_document(did):
         c = my_candidate()
-        r = db().execute("SELECT id FROM documents WHERE id=? AND candidate_id=?", (did, c["id"])).fetchone()
+        r = db().execute("SELECT id, blob_url FROM documents WHERE id=? AND candidate_id=?", (did, c["id"])).fetchone()
         if not r:
             return jsonify({"error": "document not found"}), 404
+        blob_url = r["blob_url"]
         db().execute("DELETE FROM documents WHERE id=?", (did,))
         db().commit()
+        if blob_url:
+            storage.delete_upload(blob_url=blob_url)  # never raises
         rebuild_master(db(), c["id"])
         return jsonify({"ok": True, "deleted": did})
 
@@ -823,7 +870,7 @@ def create_app(db_path=None, testing=False):
         out = []
         for r in rows:
             d = row_to_dict(r)
-            d["candidate_photo_url"] = f"/uploads/{d['candidate_photo']}" if d.get("candidate_photo") else ""
+            d["candidate_photo_url"] = storage.display_url(d.get("candidate_photo"))
             out.append(d)
         return out
 

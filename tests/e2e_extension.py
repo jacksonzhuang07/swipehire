@@ -160,7 +160,7 @@ def main():
         for _ in range(40):
             try:
                 with urllib.request.urlopen(f"http://localhost:{API_PORT}/api/health", timeout=2) as resp:
-                    if json.loads(resp.read())["version"] == 6:
+                    if json.loads(resp.read())["version"] == 7:
                         break
             except Exception:
                 time.sleep(0.5)

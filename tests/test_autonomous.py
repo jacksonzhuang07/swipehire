@@ -121,4 +121,4 @@ def test_needs_human_requires_own_token(client, app_):
                        json={"application_id": aid, "event": "needs_human", "note": "ok"}).status_code == 200
 
 def test_health_version_6(client):
-    assert client.get("/api/health").json["version"] == 6
+    assert client.get("/api/health").json["version"] == 7
