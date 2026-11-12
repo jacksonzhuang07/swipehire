@@ -200,7 +200,17 @@ def init_db(path=None):
     for table, col, ddl in _MIGRATIONS:
         cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
         if cols and col not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            except Exception:
+                # The hosted (Turso) table_info view can lag a migration a
+                # concurrent cold start just applied, so the guard above can
+                # miss a column that already exists and the ALTER then fails
+                # with "duplicate column name". Migrations must be idempotent
+                # and must never take the app down at boot — the column is
+                # there, which is all the migration wants. (Prod incident
+                # 2026-11-12: this crash-looped every invocation.)
+                pass
     conn.commit()
     backfill_classification(conn)
     backfill_work_mode(conn)
