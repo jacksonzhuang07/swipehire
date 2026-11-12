@@ -1,6 +1,6 @@
-import os, json, uuid, functools, secrets, sys
+import os, json, uuid, functools, secrets, sys, mimetypes
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, render_template, g, session, send_from_directory, Response, redirect
+from flask import Flask, request, jsonify, render_template, g, session, send_from_directory, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from .db import init_db, get_conn, row_to_dict, get_db_path, get_uploads_dir
@@ -152,20 +152,29 @@ def create_app(db_path=None, testing=False):
 
     @app.route("/api/health")
     def health():
-        return jsonify({"ok": True, "app": "SwipeHire", "version": 7,
+        return jsonify({"ok": True, "app": "SwipeHire", "version": 8,
                         "storage": storage.backend_name()})
 
     @app.route("/uploads/<path:filename>")
     @login_required()
     def uploads(filename):
         name = os.path.basename(filename)
-        # Blob backend: if the owning record carries a blob URL, hand the
-        # browser off to it; otherwise serve the local file as before.
+        # Blob backend: the store is PRIVATE, so the blob URL is never
+        # handed to the browser — fetch the object server-side with the
+        # token and stream the bytes to this session-authorized user.
+        # Local backend: serve the file from disk, as before.
         for sql in ("SELECT photo_blob_url u FROM candidates WHERE photo=?",
                     "SELECT logo_blob_url u FROM employers WHERE logo=?"):
             r = db().execute(sql, (name,)).fetchone()
             if r and r["u"]:
-                return redirect(r["u"])
+                try:
+                    data, ctype = storage.blob_get(r["u"])
+                except Exception:
+                    app.logger.exception("blob fetch failed for upload %s", name)
+                    return jsonify({"error": "stored file temporarily unavailable"}), 502
+                return Response(data, content_type=ctype
+                                or mimetypes.guess_type(name)[0]
+                                or "application/octet-stream")
         return send_from_directory(app.config["UPLOADS_DIR"], name)
 
     # ---------- auth ----------

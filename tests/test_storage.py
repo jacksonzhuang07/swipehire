@@ -1,11 +1,12 @@
-"""v7 — Vercel Blob storage layer.
+"""v7/v8 — Vercel Blob storage layer (PRIVATE store contract).
 
 Local backend is the default (no token in the test env) and must behave
 exactly as before. The blob backend is exercised with the single HTTP
 choke point (storage._http) mocked — no token exists in this environment
-and none is needed: put returns a fake public URL, delete is recorded.
+and none is needed: PUT returns a fake PRIVATE URL, GET streams fake
+bytes back, DELETE is recorded.
 """
-import io, os, sqlite3, sys, urllib.parse
+import io, os, sqlite3, sys, urllib.error, urllib.parse
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,21 +14,30 @@ from app import create_app
 from app import storage
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
-BLOB_BASE = "https://teststore.public.blob.vercel-storage.com/"
+BLOB_BASE = "https://teststore.private.blob.vercel-storage.com/"
 
 
 class FakeBlobHTTP:
-    """Records Blob API calls; PUT returns a fake public URL, DELETE ok."""
-    def __init__(self, fail_delete=False):
+    """Records Blob API calls; PUT returns a fake private URL, GET
+    streams the fake object bytes, DELETE ok."""
+    def __init__(self, fail_delete=False, fail_get=False):
         self.puts = []     # (pathname, data, headers)
+        self.gets = []     # (url, headers)
         self.deletes = []  # [url, ...]
         self.fail_delete = fail_delete
+        self.fail_get = fail_get
 
-    def __call__(self, method, url, data=None, headers=None):
+    def __call__(self, method, url, data=None, headers=None, raw=False):
         if method == "PUT":
             pathname = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["pathname"][0]
             self.puts.append((pathname, data, headers or {}))
             return {"url": BLOB_BASE + pathname, "pathname": pathname}
+        if method == "GET":
+            assert raw, "blob object fetches must use raw mode"
+            self.gets.append((url, headers or {}))
+            if self.fail_get:
+                raise storage.BlobAPIError(503, "store unavailable")
+            return PNG, "image/png"
         if method == "POST" and url.endswith("/delete"):
             if self.fail_delete:
                 raise RuntimeError("blob API down")
@@ -82,6 +92,38 @@ def test_blob_put_wire_shape(blob):
     assert headers["Authorization"] == "Bearer vercel_blob_rw_testtoken"
     assert headers["x-api-version"] == "7"
     assert headers["x-content-type"] == "image/png"
+    # v8: the connected store is PRIVATE — PUT must declare it, or the
+    # API rejects the upload with HTTP 400 (the production v7 failure).
+    assert headers["x-vercel-blob-access"] == "private"
+
+
+def test_blob_get_wire_shape(blob):
+    data, ctype = storage.blob_get(BLOB_BASE + "candidates_1_ab12cd.png")
+    assert data == PNG and ctype == "image/png"
+    url, headers = blob.gets[0]
+    assert url == BLOB_BASE + "candidates_1_ab12cd.png"
+    assert headers["Authorization"] == "Bearer vercel_blob_rw_testtoken"
+
+
+def test_http_error_body_propagates(monkeypatch, caplog):
+    """v8: a Blob API rejection must surface the API's own error message
+    (in the raised error AND the log) — v7 discarded the body, which is
+    what made the production 400 undebuggable. Token never logged."""
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_SECRETTOKEN")
+    body = b'{"error": {"code": "bad_request", "message": "access must be declared"}}'
+
+    def raise_http_error(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request",
+                                     hdrs=None, fp=io.BytesIO(body))
+    monkeypatch.setattr(storage.urllib.request, "urlopen", raise_http_error)
+    with caplog.at_level("ERROR"):
+        with pytest.raises(storage.BlobAPIError) as ei:
+            storage.blob_put("x.png", PNG, "image/png")
+    assert ei.value.status == 400
+    assert "access must be declared" in ei.value.detail
+    assert "access must be declared" in caplog.text
+    assert "SECRETTOKEN" not in caplog.text
+    assert "SECRETTOKEN" not in str(ei.value)
 
 
 def test_save_upload_local_writes_file(monkeypatch, tmp_path):
@@ -110,7 +152,7 @@ def test_delete_upload_tolerates_blob_failure(monkeypatch):
 def test_health_reports_local_storage(client, monkeypatch):
     monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
     h = client.get("/api/health").json
-    assert h["version"] == 7 and h["storage"] == "local"
+    assert h["version"] == 8 and h["storage"] == "local"
 
 
 def test_health_reports_blob_storage(client, blob):
@@ -119,7 +161,7 @@ def test_health_reports_blob_storage(client, blob):
 
 # ---------- app: photo on the blob backend ----------
 
-def test_photo_upload_blob_stores_url_and_view_redirects(client, app_, blob):
+def test_photo_upload_blob_stores_url_and_view_proxies_bytes(client, app_, blob):
     user = signup(client)
     cid = user["candidate"]["id"]
     r = client.post("/api/profile/photo", data={"file": (io.BytesIO(PNG), "me.png")},
@@ -133,11 +175,33 @@ def test_photo_upload_blob_stores_url_and_view_redirects(client, app_, blob):
     assert stored_name == name
     assert stored_url == BLOB_BASE + name  # put's returned URL is on the record
     assert blob.puts and blob.puts[0][0] == name
-    # The /uploads route redirects to the blob URL on this backend.
+    # v8: the store is PRIVATE, so /uploads must NOT redirect to the blob
+    # URL — it fetches the bytes server-side (with the token) and streams
+    # them to the session-authorized user.
     v = client.get(f"/uploads/{name}")
-    assert v.status_code == 302 and v.headers["Location"] == stored_url
+    assert v.status_code == 200 and v.data == PNG
+    assert v.headers["Content-Type"].startswith("image/png")
+    assert blob.gets and blob.gets[0][0] == stored_url
+    assert blob.gets[0][1]["Authorization"] == "Bearer vercel_blob_rw_testtoken"
     # API payloads resolve through the same route.
     assert client.get("/api/candidate").json["photo_url"] == f"/uploads/{name}"
+
+
+def test_uploads_route_requires_login_on_blob_backend(app_, blob):
+    anon = app_.test_client()
+    assert anon.get("/uploads/whatever.png").status_code == 401
+
+
+def test_photo_view_blob_get_failure_is_502(client, app_, monkeypatch):
+    fake = FakeBlobHTTP(fail_get=True)
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_testtoken")
+    monkeypatch.setattr(storage, "_http", fake)
+    signup(client)
+    r = client.post("/api/profile/photo", data={"file": (io.BytesIO(PNG), "me.png")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 200, r.data
+    v = client.get(f"/uploads/{r.json['filename']}")
+    assert v.status_code == 502
 
 
 def test_photo_upload_local_serves_bytes(client, app_, monkeypatch):
