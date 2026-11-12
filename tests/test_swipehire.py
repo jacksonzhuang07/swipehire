@@ -196,7 +196,9 @@ def test_swipe_right_creates_application_and_dedupe(client):
     login(client)
     job = client.get("/api/discovery").json[0]
     r1 = client.post("/api/swipe", json={"job_id": job["id"], "direction": "right"})
-    assert r1.json["application"]["status"] in ("submitted", "needs_review")
+    # Honest status model: the web app prepares packages — never "submitted".
+    assert r1.json["application"]["status"] in ("prepared", "needs_review", "queued_extension")
+    assert r1.json["application"]["status"] != "submitted"
     client.post("/api/swipe", json={"job_id": job["id"], "direction": "right"})
     apps = client.get("/api/applications").json
     assert len([a for a in apps if a["job_id"] == job["id"]]) == 1

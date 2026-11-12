@@ -1,4 +1,4 @@
-import os, json, uuid, functools, secrets
+import os, json, uuid, functools, secrets, sys
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template, g, session, send_from_directory, Response
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -31,7 +31,15 @@ def create_app(db_path=None, testing=False):
     app = Flask(__name__)
     app.config["TESTING"] = testing
     app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
-    app.secret_key = os.environ.get("SWIPEHIRE_SECRET") or "swipehire-dev-secret-change-in-prod"
+    _secret = os.environ.get("SWIPEHIRE_SECRET")
+    app.secret_key = _secret or "swipehire-dev-secret-change-in-prod"
+    app.config["PRODUCTION"] = os.environ.get("SWIPEHIRE_ENV") == "production"
+    if app.config["PRODUCTION"] and not _secret:
+        print("=" * 72, file=sys.stderr)
+        print("WARNING: SWIPEHIRE_ENV=production but SWIPEHIRE_SECRET is NOT set —", file=sys.stderr)
+        print("sessions are signed with the built-in DEV secret. Set SWIPEHIRE_SECRET", file=sys.stderr)
+        print("to a long random value in the deployment environment before real use.", file=sys.stderr)
+        print("=" * 72, file=sys.stderr)
     path = db_path or ("/tmp/swipehire_test.db" if testing else _db_path())
     app.config["DB_PATH"] = path
     uploads = _uploads_for(path, testing)
@@ -131,11 +139,19 @@ def create_app(db_path=None, testing=False):
     # ---------- pages / health ----------
     @app.route("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", production=app.config["PRODUCTION"])
+
+    @app.route("/privacy")
+    def privacy():
+        return render_template("privacy.html", production=app.config["PRODUCTION"])
+
+    @app.route("/terms")
+    def terms():
+        return render_template("terms.html", production=app.config["PRODUCTION"])
 
     @app.route("/api/health")
     def health():
-        return jsonify({"ok": True, "app": "SwipeHire", "version": 4})
+        return jsonify({"ok": True, "app": "SwipeHire", "version": 5})
 
     @app.route("/uploads/<path:filename>")
     @login_required()
@@ -357,6 +373,176 @@ def create_app(db_path=None, testing=False):
         r = db().execute("SELECT * FROM candidates WHERE id=?", (c["id"],)).fetchone()
         return jsonify(public_candidate(row_to_dict(r)))
 
+    # ---------- connections (apply tiers) ----------
+    BOARDS = ("linkedin", "indeed")
+
+    @app.route("/api/connections", methods=["GET", "POST"])
+    @login_required("candidate")
+    def connections():
+        """Tier 2 fallback bookkeeping: a candidate may record which board
+        account a worker session will be established for. We store ONLY the
+        board + the account identifier (username/email) the user types —
+        NEVER a password; there is deliberately no password field anywhere
+        in this flow."""
+        u = g.user
+        c = my_candidate()
+        if request.method == "POST":
+            d = request.get_json(force=True, silent=True) or {}
+            board = (d.get("board") or "").strip().lower()
+            identifier = (d.get("identifier") or "").strip()
+            if board not in BOARDS:
+                return jsonify({"error": "board must be linkedin or indeed"}), 400
+            if not identifier:
+                return jsonify({"error": "account username/email required"}), 400
+            db().execute("INSERT INTO connections(user_id,candidate_id,board,identifier,status) VALUES(?,?,?,?,'pending_session') "
+                         "ON CONFLICT(user_id,board) DO UPDATE SET identifier=excluded.identifier, status='pending_session'",
+                         (u["id"], c["id"] if c else None, board, identifier))
+            db().commit()
+            r = db().execute("SELECT * FROM connections WHERE user_id=? AND board=?", (u["id"], board)).fetchone()
+            return jsonify(row_to_dict(r)), 201
+        rows = db().execute("SELECT * FROM connections WHERE user_id=? ORDER BY board", (u["id"],)).fetchall()
+        return jsonify({"connections": [row_to_dict(r) for r in rows], "extension": _ext_state(u["id"])})
+
+    def _ext_state(user_id):
+        rows = db().execute("SELECT * FROM ext_tokens WHERE user_id=? AND revoked=0 ORDER BY id DESC", (user_id,)).fetchall()
+        used = [r for r in rows if r["last_used_at"]]
+        return {"has_token": bool(rows),
+                "connected": bool(used),
+                "last_used_at": used[0]["last_used_at"] if used else None}
+
+    @app.route("/api/ext/pairing-token", methods=["POST", "DELETE"])
+    @login_required("candidate")
+    def pairing_token():
+        """Generate (POST) or revoke (DELETE) the browser-extension pairing
+        token. Only the hash is stored; the plaintext is returned ONCE."""
+        if request.method == "DELETE":
+            db().execute("UPDATE ext_tokens SET revoked=1 WHERE user_id=?", (g.user["id"],))
+            db().commit()
+            return jsonify({"ok": True, "revoked": True})
+        token = "shx_" + secrets.token_urlsafe(24)
+        db().execute("UPDATE ext_tokens SET revoked=1 WHERE user_id=?", (g.user["id"],))
+        db().execute("INSERT INTO ext_tokens(user_id,token_hash) VALUES(?,?)",
+                     (g.user["id"], generate_password_hash(token)))
+        db().commit()
+        return jsonify({"token": token, "note": "Copy this into the SwipeHire extension popup. It is shown once — generating a new one revokes the old."}), 201
+
+    def _ext_user():
+        """Authenticate an extension request by pairing token (NOT session)."""
+        auth = request.headers.get("Authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else (request.headers.get("X-Extension-Token") or "").strip()
+        if not token:
+            return None
+        for r in db().execute("SELECT * FROM ext_tokens WHERE revoked=0").fetchall():
+            if check_password_hash(r["token_hash"], token):
+                db().execute("UPDATE ext_tokens SET last_used_at=datetime('now') WHERE id=?", (r["id"],))
+                db().commit()
+                u = db().execute("SELECT * FROM users WHERE id=?", (r["user_id"],)).fetchone()
+                return dict(u) if u else None
+        return None
+
+    @app.route("/api/ext/queue")
+    def ext_queue():
+        u = _ext_user()
+        if not u:
+            return jsonify({"error": "invalid or revoked extension token"}), 401
+        rows = db().execute(
+            "SELECT a.*, j.title, j.company, j.url, j.source, j.apply_type FROM applications a JOIN jobs j ON j.id=a.job_id "
+            "WHERE a.candidate_id=? AND (a.status='queued_extension' OR a.method='extension_required') ORDER BY a.id",
+            (u["candidate_id"],)).fetchall()
+        out = []
+        for r in rows:
+            d = row_to_dict(r)
+            out.append({"application_id": d["id"], "status": d["status"], "method": d["method"],
+                        "job_title": d["title"], "company": d["company"], "job_url": d["url"],
+                        "source": d["source"], "apply_type": d["apply_type"],
+                        "answers": d.get("answers") or {}, "tailored_resume": d.get("tailored_resume") or ""})
+        return jsonify({"queue": out})
+
+    @app.route("/api/ext/report", methods=["POST"])
+    def ext_report():
+        """Extension reports progress. 'submitted' is accepted ONLY here —
+        an explicit report from the extension (its Mark-submitted button or
+        a detected confirmation page). The web app never claims it alone."""
+        u = _ext_user()
+        if not u:
+            return jsonify({"error": "invalid or revoked extension token"}), 401
+        d = request.get_json(force=True, silent=True) or {}
+        event = (d.get("event") or "").strip().lower()
+        if event not in ("opened", "filled", "submitted", "failed"):
+            return jsonify({"error": "event must be opened|filled|submitted|failed"}), 400
+        r = db().execute("SELECT * FROM applications WHERE id=? AND candidate_id=?", (d.get("application_id"), u["candidate_id"])).fetchone()
+        if not r:
+            return jsonify({"error": "application not found"}), 404
+        app_row = row_to_dict(r)
+        note = (d.get("note") or "").strip()[:300]
+        if event == "submitted":
+            db().execute("UPDATE applications SET status='submitted', updated_at=datetime('now'), proof=? WHERE id=?",
+                         (f"Submitted — confirmed by the SwipeHire extension working in your own logged-in browser.{(' Note: ' + note) if note else ''}", app_row["id"]))
+        elif event == "failed":
+            db().execute("UPDATE applications SET status='needs_review', updated_at=datetime('now'), proof=? WHERE id=?",
+                         (f"{app_row.get('proof','')} [Extension reported it could not apply{(': ' + note) if note else ''} — needs your review.]", app_row["id"]))
+        else:  # opened / filled: progress only, status unchanged
+            db().execute("UPDATE applications SET updated_at=datetime('now'), proof=? WHERE id=?",
+                         (f"{app_row.get('proof','')} [Extension: {event}.]", app_row["id"]))
+        db().commit()
+        return jsonify(row_to_dict(db().execute("SELECT * FROM applications WHERE id=?", (app_row["id"],)).fetchone()))
+
+    @app.route("/extension/download")
+    def extension_download():
+        return send_from_directory(os.path.join(app.root_path, "static"), "swipehire-extension.zip",
+                                   as_attachment=True, download_name="swipehire-extension.zip")
+
+    @app.route("/api/connections/<board>", methods=["DELETE"])
+    @login_required("candidate")
+    def disconnect(board):
+        board = (board or "").strip().lower()
+        cur = db().execute("DELETE FROM connections WHERE user_id=? AND board=?", (g.user["id"], board))
+        db().commit()
+        if not cur.rowcount:
+            return jsonify({"error": "connection not found"}), 404
+        return jsonify({"ok": True, "disconnected": board})
+
+    # ---------- delete account ----------
+    @app.route("/api/account", methods=["DELETE"])
+    @login_required()
+    def delete_account():
+        """Delete the signed-in user and ALL of their scoped data."""
+        u = g.user
+        conn = db()
+        cand_id, emp_id = u.get("candidate_id"), u.get("employer_id")
+        match_ids = set()
+        if cand_id:
+            match_ids |= {r["id"] for r in conn.execute("SELECT id FROM matches WHERE candidate_id=?", (cand_id,)).fetchall()}
+        if emp_id:
+            match_ids |= {r["id"] for r in conn.execute("SELECT id FROM matches WHERE employer_id=?", (emp_id,)).fetchall()}
+        for mid in match_ids:
+            conn.execute("DELETE FROM messages WHERE match_id=?", (mid,))
+        if cand_id:
+            conn.execute("DELETE FROM matches WHERE candidate_id=?", (cand_id,))
+            conn.execute("DELETE FROM employer_swipes WHERE candidate_id=?", (cand_id,))
+            conn.execute("DELETE FROM swipes WHERE candidate_id=?", (cand_id,))
+            conn.execute("DELETE FROM applications WHERE candidate_id=?", (cand_id,))
+            conn.execute("DELETE FROM documents WHERE candidate_id=?", (cand_id,))
+            conn.execute("DELETE FROM candidates WHERE id=?", (cand_id,))
+        if emp_id:
+            conn.execute("DELETE FROM matches WHERE employer_id=?", (emp_id,))
+            conn.execute("DELETE FROM employer_swipes WHERE employer_id=?", (emp_id,))
+            job_ids = [r["id"] for r in conn.execute("SELECT id FROM jobs WHERE employer_id=?", (emp_id,)).fetchall()]
+            for jid in job_ids:
+                conn.execute("DELETE FROM swipes WHERE job_id=?", (jid,))
+                conn.execute("DELETE FROM applications WHERE job_id=?", (jid,))
+                conn.execute("DELETE FROM employer_swipes WHERE job_id=?", (jid,))
+                conn.execute("DELETE FROM matches WHERE job_id=?", (jid,))
+            conn.execute("DELETE FROM jobs WHERE employer_id=?", (emp_id,))
+            conn.execute("DELETE FROM employers WHERE id=?", (emp_id,))
+        conn.execute("DELETE FROM connections WHERE user_id=?", (u["id"],))
+        conn.execute("DELETE FROM ext_tokens WHERE user_id=?", (u["id"],))
+        conn.execute("DELETE FROM login_codes WHERE email=?", (u["email"],))
+        conn.execute("DELETE FROM users WHERE id=?", (u["id"],))
+        conn.commit()
+        session.clear()
+        return jsonify({"ok": True, "deleted_user": u["email"]})
+
     # ---------- document vault / master profile / compiled resume ----------
     def _add_document(candidate_id, doc_type, title, filename, text):
         facts = parse_document_facts(text, doc_type)
@@ -477,12 +663,13 @@ def create_app(db_path=None, testing=False):
             return jsonify({"error": "direction must be left/right"}), 400
         db().execute("INSERT OR IGNORE INTO swipes(candidate_id,job_id,direction) VALUES(?,?,?)", (c["id"], job["id"], direction))
         db().commit()
-        result = {"swipe": direction}
+        result = {"swipe": direction, "needs_extension": False}
         if direction == "right":
             fresh = row_to_dict(db().execute("SELECT * FROM candidates WHERE id=?", (c["id"],)).fetchone())
             app_obj, created = apply_for_job(db(), fresh, job)
             result["application"] = app_obj
             result["created"] = created
+            result["needs_extension"] = bool(app_obj and app_obj.get("method") == "extension_required")
             m = maybe_create_match(db(), c["id"], job["id"])
             if m:
                 result["match"] = m

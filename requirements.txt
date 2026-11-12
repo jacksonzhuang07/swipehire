@@ -1,3 +1,4 @@
 flask>=3.0
 pypdf>=4.0
+libsql>=0.1
 pytest>=8.0

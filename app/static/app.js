@@ -76,7 +76,7 @@ function boot(user) {
   const person = user.role === 'candidate' ? user.candidate : user.employer;
   $('user-box').innerHTML = `${avatarHTML(person || {}, 'small')} <span>${esc(user.name || user.email)} · ${esc(user.role)}</span> <button onclick="doLogout()">Log out</button>`;
   const nav = user.role === 'candidate'
-    ? `<button data-view="discovery" onclick="showView('discovery')"><span class="nav-ic">🔥</span><span>For You</span></button><button data-view="applications" onclick="showView('applications')"><span class="nav-ic">📨</span><span>Applications</span></button><button data-view="documents" onclick="showView('documents')"><span class="nav-ic">🗂️</span><span>Documents</span></button><button data-view="profile" onclick="showView('profile')"><span class="nav-ic">👤</span><span>Profile</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`
+    ? `<button data-view="discovery" onclick="showView('discovery')"><span class="nav-ic">🔥</span><span>For You</span></button><button data-view="applications" onclick="showView('applications')"><span class="nav-ic">📨</span><span>Applications</span></button><button data-view="documents" onclick="showView('documents')"><span class="nav-ic">🗂️</span><span>Documents</span></button><button data-view="profile" onclick="showView('profile')"><span class="nav-ic">👤</span><span>Profile</span></button><button data-view="connections" onclick="showView('connections')"><span class="nav-ic">🔌</span><span>Connections</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`
     : `<button data-view="employer" onclick="showView('employer')"><span class="nav-ic">🔥</span><span>Employer</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`;
   $('main-nav').innerHTML = nav;
   showView(user.role === 'candidate' ? 'discovery' : 'employer');
@@ -91,6 +91,7 @@ function showView(v) {
   if (v === 'profile') loadProfile();
   if (v === 'employer') loadEmployer();
   if (v === 'matches') loadMatches();
+  if (v === 'connections') loadConnections();
 }
 
 // ---------- candidate discovery ----------
@@ -100,7 +101,7 @@ function badgesHTML(scoreLabel, feedScore, isStretch) {
 }
 function cardHTML(j) {
   const initial = esc((j.company || '?').trim().charAt(0).toUpperCase() || '?');
-  return `<div class="card job-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero"><div class="segments"><i></i></div>${badgesHTML(j.score + '% match', j.feed_score, j.is_stretch)}<div class="hero-center"><span class="hero-initial">${initial}</span></div><div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div><div class="card-body"><p class="meta-line"><span>📍 ${esc(j.location || 'Unspecified')}${j.remote ? ' · Remote' : ''}</span>${j.salary_text ? `<span class="salary">${esc(j.salary_text)}</span>` : ''}<span>Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></p><p class="desc">${esc((j.description || '').slice(0, 400))}</p><div class="chips">${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a class="apply-link" href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div></div>`;
+  return `<div class="card job-card" id="top-card"><div class="stamp stamp-like">Like</div><div class="stamp stamp-nope">Nope</div><div class="card-hero"><div class="segments"><i></i></div>${badgesHTML(j.score + '% match', j.feed_score, j.is_stretch)}<div class="hero-center"><span class="hero-initial">${initial}</span></div><div class="hero-scrim"><h2>${esc(j.title)}</h2><p class="hero-sub">${esc(j.company)}</p></div></div><div class="card-body"><p class="meta-line">${j.requires_login ? '<span class="lock-badge">🔒 Login required</span>' : ''}<span>📍 ${esc(j.location || 'Unspecified')}${j.remote ? ' · Remote' : ''}</span>${j.salary_text ? `<span class="salary">${esc(j.salary_text)}</span>` : ''}<span>Source: ${esc(j.source)}${j.source === 'seeded' ? ' (curated fallback pool)' : ''}</span></p><p class="desc">${esc((j.description || '').slice(0, 400))}</p><div class="chips">${(j.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>${whyHTML(j)}${j.url ? `<a class="apply-link" href="${esc(j.url)}" target="_blank" rel="noopener">View / apply on source ↗</a>` : ''}</div></div>`;
 }
 function peekHTML(j) {
   if (!j) return '';
@@ -116,8 +117,20 @@ async function swipeCurrent(dir) {
   const r = await POST('/api/swipe', { job_id: j.id, direction: dir });
   deck.shift();
   if (r.json && r.json.match) showMatch({ name: j.title, sub: j.company, otherInitial: (j.company || '?').charAt(0).toUpperCase(), otherPhoto: '' });
-  else if (dir === 'right' && r.json && r.json.application) alert('Application: ' + r.json.application.status + ' (' + r.json.application.method + ') — with a tailored resume built from your Master Profile facts only. Gaps are listed, never invented.');
+  else if (dir === 'right' && r.json && r.json.needs_extension) showExtModal(j);
+  else if (dir === 'right' && r.json && r.json.application) alert('Application: ' + statusLabel(r.json.application) + ' — with a tailored resume built from your Master Profile facts only. Gaps are listed, never invented.');
   renderDeck();
+}
+function statusLabel(a) {
+  if (a.status === 'submitted') return 'Submitted';
+  if (a.status === 'queued_extension') return 'Queued for extension';
+  if (a.status === 'needs_review') return 'Needs review';
+  if (a.method === 'extension_required') return 'Needs extension';
+  return 'Prepared';
+}
+function statusPill(a) { return `<span class="status-pill st-${esc(a.status)}${a.method === 'extension_required' ? ' st-extreq' : ''}">${esc(statusLabel(a))}</span>`; }
+function showExtModal(j) {
+  openModal(`<div class="ext-modal"><h3>🔒 This one needs your login</h3><p><b>${esc(j.title)}</b> @ ${esc(j.company)} is on a job network / portal (${esc(j.source)}) that applies through <b>your</b> account — LinkedIn, Indeed, or a Workday-style portal.</p><p>Your application package is saved as <b>Prepared — Needs extension</b>, with your tailored resume ready. The free SwipeHire browser extension applies in <b>your own logged-in browser</b> — we never see or store your job-board passwords.</p><div class="ext-btns"><a href="/extension/download"><button>⬇ Install the SwipeHire extension</button></a><button onclick="closeModal();showView('connections')">Set it up on Connections</button><button class="pass" onclick="closeModal()">Later — keep it prepared</button></div></div>`);
 }
 
 // ---------- match overlay ----------
@@ -141,7 +154,7 @@ function closeMatch(goMatches) {
 // ---------- applications ----------
 async function loadApps() {
   const apps = await apiJ('/api/applications') || [];
-  $('apps').innerHTML = apps.length ? apps.map(a => `<div class="row"><div><b>${esc(a.title)}</b> @ ${esc(a.company)}<br><span class="meta">${esc(a.status)} · ${esc(a.method)} · ${esc(a.created_at || '')} ${a.tailored ? '<span class="stretch-pill">Tailored for this job</span>' : ''}</span><br><span class="meta">${esc(a.proof || '')}</span>${a.coverage && (a.coverage.missing || []).length ? `<br><span class="meta">Keyword gaps (left out, never invented): ${esc((a.coverage.missing || []).join(', '))}</span>` : ''}</div>${a.has_tailored ? `<button onclick="viewTailored(${a.id})">View tailored resume</button>` : ''}</div>`).join('') : '<p>No applications yet — swipe right on a job.</p>';
+  $('apps').innerHTML = apps.length ? apps.map(a => `<div class="row"><div><b>${esc(a.title)}</b> @ ${esc(a.company)}<br>${statusPill(a)} <span class="meta">${esc(a.method)} · ${esc(a.created_at || '')} ${a.tailored ? '<span class="stretch-pill">Tailored for this job</span>' : ''}</span><br><span class="meta">${esc(a.proof || '')}</span>${a.coverage && (a.coverage.missing || []).length ? `<br><span class="meta">Keyword gaps (left out, never invented): ${esc((a.coverage.missing || []).join(', '))}</span>` : ''}</div>${a.has_tailored ? `<button onclick="viewTailored(${a.id})">View tailored resume</button>` : ''}</div>`).join('') : '<p>No applications yet — swipe right on a job.</p>';
 }
 async function viewTailored(aid) {
   const t = await apiJ('/api/applications/' + aid + '/tailored-resume');
@@ -255,6 +268,68 @@ async function uploadLogo() {
   const r = await fetch('/api/employer/logo', { method: 'POST', body: fd }); const j = await r.json();
   if (r.status !== 200) { alert(j.error || 'Upload failed'); return; }
   loadEmployer();
+}
+
+// ---------- connections (apply tiers) ----------
+async function loadConnections() {
+  const data = await apiJ('/api/connections') || {};
+  const conns = data.connections || [];
+  const ext = data.extension || {};
+  const byBoard = {}; conns.forEach(c => byBoard[c.board] = c);
+  const boardRow = (board, label) => {
+    const c = byBoard[board];
+    return c
+      ? `<div class="row"><div><b>${label}</b> — ${esc(c.identifier)}<br><span class="meta">Status: ${esc(c.status)} · added ${esc(c.created_at || '')}</span></div><button class="pass" onclick="disconnectBoard('${board}')">Disconnect</button></div>`
+      : `<div class="conn-form"><label>${label} account (username or email — <b>never</b> your password)<input id="conn-${board}" placeholder="you@example.com"></label><button onclick="linkBoard('${board}')">Link ${label}</button></div>`;
+  };
+  const extState = ext.connected
+    ? `<span class="status-pill st-submitted">Extension connected</span> <span class="meta">last used ${esc(ext.last_used_at || '')}</span>`
+    : ext.has_token
+      ? `<span class="status-pill st-queued_extension">Pairing token issued</span> <span class="meta">paste it into the extension popup to finish connecting</span>`
+      : `<span class="status-pill st-prepared">Not connected</span>`;
+  $('connections').innerHTML = `
+  <div class="card conn-tier"><h3>Tier 0 — No-account jobs <span class="status-pill st-submitted">Active</span></h3>
+   <p>Greenhouse, Lever, Ashby, Workable and plain company application forms need <b>no account at all</b>. Right-swipes to these jobs are prepared for the form executor — tailored resume + answers from your stored facts. Nothing to set up, and the browser extension is never involved in these.</p></div>
+  <div class="card conn-tier" id="extension-setup"><h3>Tier 1 — Browser extension <span class="meta">(only for 🔒 login-required jobs)</span></h3>
+   <p>For LinkedIn / Indeed / Workday-style jobs, the free SwipeHire extension applies in <b>your own browser, using the sessions you are already logged into</b> — SwipeHire never sees or stores those passwords. It autofills from your application package; you make the final submit click, and the result syncs back.</p>
+   <p>${extState}</p>
+   <div class="ext-btns"><a href="/extension/download"><button>⬇ Download extension (.zip)</button></a><button onclick="genPairingToken()">Generate pairing token</button>${ext.has_token ? '<button class="pass" onclick="revokePairingToken()">Revoke token</button>' : ''}</div>
+   <div id="pairing-token" class="token-box hidden"></div>
+   <p class="meta">Install: unzip → chrome://extensions → Developer mode → Load unpacked → pick the folder → click the SwipeHire icon → paste the pairing token → Save. Full steps are in the zip's README.</p></div>
+  <div class="card conn-tier"><h3>Tier 2 — Link an account <span class="meta">(fallback)</span></h3>
+   <p>If you'd rather a server worker apply for you, record which account a worker session will be established for. <b>We store only the board + the identifier you type — never a password.</b> A worker session is established separately; until then the status stays <i>pending_session</i>.</p>
+   ${boardRow('linkedin', 'LinkedIn')}
+   ${boardRow('indeed', 'Indeed')}
+  </div>`;
+}
+async function genPairingToken() {
+  const r = await POST('/api/ext/pairing-token');
+  if (r.status !== 201) { alert((r.json && r.json.error) || 'Failed'); return; }
+  const box = $('pairing-token');
+  box.innerHTML = `Your pairing token (shown once — a new one revokes this):<br><b class="token-code">${esc(r.json.token)}</b><br><button onclick="navigator.clipboard && navigator.clipboard.writeText('${esc(r.json.token)}')">Copy</button>`;
+  box.classList.remove('hidden');
+}
+async function revokePairingToken() {
+  await fetch('/api/ext/pairing-token', { method: 'DELETE' });
+  loadConnections();
+}
+async function linkBoard(board) {
+  const identifier = $('conn-' + board).value.trim();
+  if (!identifier) { alert('Enter the account username/email first'); return; }
+  const r = await POST('/api/connections', { board: board, identifier: identifier });
+  if (r.status !== 201) { alert((r.json && r.json.error) || 'Failed'); return; }
+  loadConnections();
+}
+async function disconnectBoard(board) {
+  await fetch('/api/connections/' + board, { method: 'DELETE' });
+  loadConnections();
+}
+async function deleteAccount() {
+  if (!confirm('Delete your SwipeHire account and ALL your data? This cannot be undone.')) return;
+  if (!confirm('Really sure? Documents, applications, connections, matches — everything goes.')) return;
+  const r = await fetch('/api/account', { method: 'DELETE' });
+  if (r.status !== 200) { alert('Delete failed'); return; }
+  location.reload();
 }
 
 // ---------- matches ----------

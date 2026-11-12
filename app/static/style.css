@@ -266,3 +266,25 @@ footer { text-align: center; color: var(--faint); padding: 26px 16px 34px; font-
   .match-avatar { width: 100px; height: 100px; font-size: 34px; }
   footer { padding-bottom: 96px; }
 }
+
+/* ---- v5 launch: statuses, connections, legal, extension ---- */
+.status-pill { display: inline-block; border-radius: 999px; padding: 3px 11px; font-size: 12px; font-weight: 800; background: #eef0f2; color: #444; }
+.status-pill.st-prepared { background: #e6f4ff; color: #0b5fa5; }
+.status-pill.st-extreq { background: #fff3cd; color: #8a6d00; }
+.status-pill.st-queued_extension { background: #efe6ff; color: #5b2ea6; }
+.status-pill.st-submitted { background: #e2f7e9; color: #0a7d4f; }
+.status-pill.st-needs_review { background: #ffe0e7; color: #c9184a; }
+.lock-badge { display: inline-block; background: #14142b; color: #fff; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
+.card.legal { max-width: 760px; }
+.card.legal h3 { margin: 18px 0 6px; }
+.card.legal p { line-height: 1.55; color: #33334d; }
+.conn-tier { text-align: left; }
+.conn-tier h3 { margin-top: 2px; }
+.conn-tier p { line-height: 1.5; color: #33334d; }
+.conn-form { margin: 10px 0; }
+.ext-btns { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+.token-box { background: #fffbe6; border: 2px dashed #e6c200; border-radius: 12px; padding: 12px 14px; margin: 10px 0; word-break: break-all; }
+.token-code { font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
+button.danger { background: #fff; color: #c9184a; border: 2px solid #c9184a; }
+.ext-modal h3 { margin-top: 0; }
+.ext-modal p { line-height: 1.5; }

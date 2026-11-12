@@ -280,8 +280,10 @@ def insert_jobs(conn, jobs):
     for j in jobs:
         if not j.get("title") or not j.get("company"):
             continue
-        cur = conn.execute("INSERT OR IGNORE INTO jobs(external_id,title,company,location,remote,salary_min,salary_max,salary_text,description,url,source,tags,employer_id,posted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (j["external_id"], j["title"], j["company"], j.get("location", ""), int(j.get("remote") or 0), j.get("salary_min"), j.get("salary_max"), j.get("salary_text", ""), j.get("description", ""), j.get("url", ""), j["source"], json.dumps(j.get("tags", [])), j.get("employer_id"), j.get("posted_at", "") or ""))
+        from .classify import classify_job
+        _at, _rl = classify_job(j.get("url", ""))
+        cur = conn.execute("INSERT OR IGNORE INTO jobs(external_id,title,company,location,remote,salary_min,salary_max,salary_text,description,url,source,tags,employer_id,posted_at,apply_type,requires_login) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (j["external_id"], j["title"], j["company"], j.get("location", ""), int(j.get("remote") or 0), j.get("salary_min"), j.get("salary_max"), j.get("salary_text", ""), j.get("description", ""), j.get("url", ""), j["source"], json.dumps(j.get("tags", [])), j.get("employer_id"), j.get("posted_at", "") or "", _at, _rl))
         new += cur.rowcount
     conn.commit()
     return new

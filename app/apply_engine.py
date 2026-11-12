@@ -11,6 +11,15 @@ KNOWN_QUESTIONS = {
 }
 UNKNOWN_QUESTIONS = ["Are you legally authorized to work in the job's country?", "What is your salary expectation?", "Are you willing to relocate?"]
 
+def extension_connected(conn, user_id):
+    """The extension counts as connected only once a pairing token issued to
+    this user has actually been USED by the extension (last_used_at set) and
+    not revoked."""
+    if not user_id:
+        return False
+    r = conn.execute("SELECT id FROM ext_tokens WHERE user_id=? AND revoked=0 AND last_used_at IS NOT NULL LIMIT 1", (user_id,)).fetchone()
+    return r is not None
+
 def build_answers(candidate):
     answers, needs = {}, []
     for q, fn in KNOWN_QUESTIONS.items():
@@ -30,15 +39,34 @@ def apply_for_job(conn, candidate, job):
         return row_to_dict(existing), False
     scored = score_job(candidate, job)
     answers, needs = build_answers(candidate)
+    # HONEST STATUS MODEL (launch): this engine assembles an application
+    # package — it does not transmit anything. Nothing here may be recorded
+    # as "submitted"; that status is reserved for a future executor that
+    # returns a real submission confirmation (Tier 0 form executor /
+    # Tier 1 browser extension / Tier 2 linked-account worker).
     if scored["score"] < SCORE_GATE:
         status, method = "needs_review", "score_gate"
         proof = f"Score {scored['score']} below gate {SCORE_GATE} — held for review, not submitted."
+    elif job.get("requires_login"):
+        # Login-required jobs (LinkedIn / Indeed / Workday-style portals) are
+        # the ONLY ones the browser-extension add-on is involved in.
+        if extension_connected(conn, candidate.get("user_id")):
+            status, method = "queued_extension", "extension"
+            proof = ("Queued for the SwipeHire browser extension — it opens this login-required job "
+                     "in your own logged-in browser and syncs the result back. Not yet submitted.")
+        else:
+            status, method = "prepared", "extension_required"
+            proof = ("Application package prepared (tailored resume + answers). This job requires your "
+                     "login (job network / Workday-style portal) and the SwipeHire extension is not "
+                     "connected yet — kept prepared, not submitted.")
     elif job.get("url"):
-        status, method = "submitted", "external_link"
-        proof = f"Submitted via external link: {job['url']} (recorded {job.get('source','')} application; confirm on employer site if prompted)."
+        status, method = "prepared", "external_link"
+        proof = (f"Application package prepared (tailored resume + answers) for {job.get('source','')} job: {job['url']} "
+                 "Not yet submitted — no executor has sent this.")
     else:
-        status, method = "submitted", "simulated_executor"
-        proof = "Simulated executor: application package assembled from stored resume facts and marked submitted in SwipeHire. This job has no real apply API, so no external submission occurred."
+        status, method = "prepared", "package_only"
+        proof = ("Application package prepared (tailored resume + answers). "
+                 "Not yet submitted — no executor has sent this.")
     # Truthful tailoring: build a per-job resume from Master Profile facts only.
     tailored_text, coverage_json, tailored_flag = "", "{}", 0
     try:
