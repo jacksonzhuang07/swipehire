@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SwipeHire — Swipe right. Get hired.</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<header><div class="logo">💘 SwipeHire</div>
+<div class="role-switch"><button id="btn-candidate" class="active" onclick="setRole('candidate')">👤 Candidate</button><button id="btn-employer" onclick="setRole('employer')">🏢 Employer</button></div>
+<nav><button onclick="showView('discovery')">Discover</button><button onclick="showView('applications')">My Applications</button><button onclick="showView('profile')">Profile</button><button onclick="showView('employer')">Employer Dashboard</button><button onclick="showView('matches')">Matches ❤️</button></nav></header>
+<main>
+<section class="hero"><h1>Swipe right. We apply for you.</h1><p>Upload your resume, swipe on jobs scored against your skills, and SwipeHire's apply pipeline handles the rest. Employers swipe too — a mutual right-swipe is a Match.</p><p class="honest">Honest labels: jobs show their real source (Remotive / Arbeitnow / Seeded fallback / Employer). Applications via a real external link are marked “external link”; jobs with no apply API use a clearly-labelled <b>simulated executor</b>.</p></section>
+
+<div id="view-discovery" class="view">
+ <div class="bar"><button onclick="rescan()">🔄 Rescan boards</button><span id="scan-result"></span><span id="cand-label"></span></div>
+ <div id="deck"></div><div class="swipe-btns"><button class="pass" onclick="swipeCurrent('left')">✕ Pass</button><button class="like" onclick="swipeCurrent('right')">♥ Apply</button></div>
+ <p class="hint">Drag the card, use the buttons, or press ← / → arrow keys.</p>
+</div>
+
+<div id="view-applications" class="view hidden"><h2>My Applications</h2><div id="apps"></div></div>
+
+<div id="view-profile" class="view hidden"><h2>Candidate Profile</h2>
+ <h3>Upload / paste resume (.txt, .md, .pdf)</h3><input type="file" id="resume-file" accept=".txt,.md,.pdf"><textarea id="resume-text" rows="6" placeholder="…or paste resume text here"></textarea><button onclick="uploadResume()">Parse resume</button>
+ <div id="profile-card"></div>
+ <h3>Preferences</h3><label>Target titles (comma separated)<input id="pref-titles"></label><label>Locations (comma separated)<input id="pref-locs"></label><label>Min salary <input id="pref-salary" type="number"></label><label><input type="checkbox" id="pref-remote"> Remote only</label><button onclick="savePrefs()">Save preferences</button>
+</div>
+
+<div id="view-employer" class="view hidden"><h2>Employer Dashboard</h2>
+ <h3>Post a job</h3><label>Title <input id="ej-title" placeholder="Backend Developer"></label><label>Location <input id="ej-loc" placeholder="Remote"></label><label>Description <textarea id="ej-desc" rows="3"></textarea></label><label>Tags / skills (comma) <input id="ej-tags" placeholder="Python, Flask, SQL"></label><label><input type="checkbox" id="ej-remote"> Remote</label><button onclick="postJob()">Post job</button>
+ <div id="my-jobs"></div><h3>Swipe candidates for your latest job</h3><div id="emp-deck"></div><div class="swipe-btns"><button class="pass" onclick="empSwipe('left')">✕ Pass</button><button class="like" onclick="empSwipe('right')">♥ Interested</button></div>
+</div>
+
+<div id="view-matches" class="view hidden"><h2>Matches ❤️</h2><div id="matches"></div></div>
+</main>
+<footer>SwipeHire demo — SQLite on Vercel is ephemeral (/tmp); see README.</footer>
+<script src="/static/app.js"></script></body></html>
