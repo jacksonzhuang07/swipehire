@@ -258,7 +258,15 @@ footer { text-align: center; color: var(--faint); padding: 26px 16px 34px; font-
   #main-nav button { flex-direction: column; gap: 1px; padding: 5px 4px; font-size: 10.5px; border-radius: 10px; }
   #main-nav button .nav-ic { font-size: 20px; line-height: 1.15; }
   .hero h1 { font-size: 31px; }
-  .card-hero { height: 290px; }
+  .card-hero { height: 210px; }
+  /* Mobile deck cards must fit between the header and the fixed bottom tab
+     bar (real job data is long: 400-char descriptions, many tags, several
+     why bullets). Clamp the flexible parts; full text is on the source. */
+  .card-body { padding: 12px 14px 20px; }
+  .meta-line { font-size: 13.5px; gap: 4px 10px; }
+  .desc { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .chips { max-height: 30px; overflow: hidden; }
+  .why ul li:nth-child(n+3) { display: none; }
   .hero-initial { font-size: 96px; }
   .hero-scrim h2 { font-size: 26px; }
   .stamp { font-size: 26px; top: 54px; }
