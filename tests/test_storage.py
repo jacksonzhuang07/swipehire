@@ -1,4 +1,5 @@
-"""v7/v8 — Vercel Blob storage layer (PRIVATE store contract).
+"""v7/v8/v8.1 — Vercel Blob storage layer (PRIVATE store contract;
+v8.1 mirrors the official @vercel/blob SDK's request construction).
 
 Local backend is the default (no token in the test env) and must behave
 exactly as before. The blob backend is exercised with the single HTTP
@@ -22,6 +23,8 @@ class FakeBlobHTTP:
     streams the fake object bytes, DELETE ok."""
     def __init__(self, fail_delete=False, fail_get=False):
         self.puts = []     # (pathname, data, headers)
+        self.put_urls = []  # full PUT request URLs, in order
+        self.posts = []    # (url, data, headers)
         self.gets = []     # (url, headers)
         self.deletes = []  # [url, ...]
         self.fail_delete = fail_delete
@@ -31,6 +34,7 @@ class FakeBlobHTTP:
         if method == "PUT":
             pathname = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["pathname"][0]
             self.puts.append((pathname, data, headers or {}))
+            self.put_urls.append(url)
             return {"url": BLOB_BASE + pathname, "pathname": pathname}
         if method == "GET":
             assert raw, "blob object fetches must use raw mode"
@@ -39,6 +43,7 @@ class FakeBlobHTTP:
                 raise storage.BlobAPIError(503, "store unavailable")
             return PNG, "image/png"
         if method == "POST" and url.endswith("/delete"):
+            self.posts.append((url, data, headers or {}))
             if self.fail_delete:
                 raise RuntimeError("blob API down")
             import json as _json
@@ -85,16 +90,61 @@ def test_backend_selection(monkeypatch):
 
 
 def test_blob_put_wire_shape(blob):
+    """v8.1: the PUT must match the official @vercel/blob SDK's put()
+    byte-for-byte at the _http boundary. v8 PUT to the object host
+    (blob.vercel-storage.com) with x-api-version 7 and no store
+    headers, and production answered HTTP 400 "Invalid pathname"."""
     url = storage.blob_put("candidates_1_ab12cd.png", PNG, "image/png")
     assert url == BLOB_BASE + "candidates_1_ab12cd.png"
+    # SDK: PUT {defaultVercelBlobApiUrl}/?pathname=<URLSearchParams>
+    # where defaultVercelBlobApiUrl is https://vercel.com/api/blob —
+    # blob.vercel-storage.com is only the object host.
+    assert blob.put_urls[0] == ("https://vercel.com/api/blob/"
+                                "?pathname=candidates_1_ab12cd.png")
     pathname, data, headers = blob.puts[0]
     assert pathname == "candidates_1_ab12cd.png" and data == PNG
     assert headers["Authorization"] == "Bearer vercel_blob_rw_testtoken"
-    assert headers["x-api-version"] == "7"
+    # SDK requestApi headers: API version 13 (BLOB_API_VERSION), the
+    # store id parsed from token segment 4 ("vercel_blob_rw_<id>_…"),
+    # a "<storeId>:<epoch-ms>:<hex>" request id, attempt "0".
+    assert headers["x-api-version"] == "13"
+    assert headers["x-vercel-blob-store-id"] == "testtoken"
+    assert headers["x-api-blob-request-attempt"] == "0"
+    rid = headers["x-api-blob-request-id"].split(":")
+    assert rid[0] == "testtoken" and rid[1].isdigit() and len(rid) == 3
     assert headers["x-content-type"] == "image/png"
     # v8: the connected store is PRIVATE — PUT must declare it, or the
     # API rejects the upload with HTTP 400 (the production v7 failure).
     assert headers["x-vercel-blob-access"] == "private"
+    # SDK createPutHeaders sends x-add-random-suffix / x-allow-overwrite
+    # ONLY when the caller explicitly sets those options; a plain
+    # put() omits both (v8 sent them unconditionally).
+    assert "x-add-random-suffix" not in headers
+    assert "x-allow-overwrite" not in headers
+
+
+def test_blob_delete_wire_shape(blob):
+    """v8.1: del() is POST {api}/delete with the same requestApi
+    headers as PUT (v8 hit the object host with version 7)."""
+    storage.blob_delete([BLOB_BASE + "candidates_1_ab12cd.png"])
+    url, data, headers = blob.posts[0]
+    assert url == "https://vercel.com/api/blob/delete"
+    import json as _json
+    assert _json.loads(data) == {"urls": [BLOB_BASE + "candidates_1_ab12cd.png"]}
+    assert headers["Authorization"] == "Bearer vercel_blob_rw_testtoken"
+    assert headers["x-api-version"] == "13"
+    assert headers["x-vercel-blob-store-id"] == "testtoken"
+    assert headers["x-api-blob-request-attempt"] == "0"
+    assert headers["Content-Type"] == "application/json"
+
+
+def test_blob_put_rejects_invalid_pathname(blob):
+    # SDK createPutOptions validation: no "//", max length 950.
+    with pytest.raises(ValueError):
+        storage.blob_put("a//b.png", PNG, "image/png")
+    with pytest.raises(ValueError):
+        storage.blob_put("x" * 951, PNG)
+    assert blob.puts == []
 
 
 def test_blob_get_wire_shape(blob):
