@@ -58,6 +58,34 @@ def create_app(db_path=None, testing=False):
             g.db = get_conn(app.config["DB_PATH"])
         return g.db
 
+    @app.errorhandler(OverflowError)
+    def _overflow(_e):
+        # A Python int too large for a SQLite INTEGER (e.g. a 30-digit id in
+        # a URL path or query param) cannot name a real row.
+        return jsonify({"error": "not found"}), 404
+
+    def _json_body(required=False):
+        """Request JSON body as a dict. Non-object JSON (list/string/number)
+        is never valid for this API: returns {} normally, or None when
+        required=True so the view can answer 400 instead of crashing."""
+        d = request.get_json(force=True, silent=True)
+        if isinstance(d, dict):
+            return d
+        return None if required else {}
+
+    def _coerce_id(v):
+        """int id from a JSON value, or None when it isn't int-like."""
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_salary(v):
+        """Salary field: int, or None for empty; raises ValueError on junk."""
+        if v is None or v == "":
+            return None
+        return int(v)
+
     @app.teardown_appcontext
     def _close(exc):
         c = g.pop("db", None)
@@ -128,10 +156,10 @@ def create_app(db_path=None, testing=False):
         return uid
 
     def _create_user_account(email, password, role, name, company=""):
-        email = (email or "").strip().lower()
+        email = email.strip().lower() if isinstance(email, str) else ""
         if not email or "@" not in email:
             return None, (jsonify({"error": "valid email required"}), 400)
-        if not password or len(password) < 4:
+        if not isinstance(password, str) or len(password) < 4:
             return None, (jsonify({"error": "password too short (min 4)"}), 400)
         if db().execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
             return None, (jsonify({"error": "email already registered"}), 409)
@@ -180,7 +208,9 @@ def create_app(db_path=None, testing=False):
     # ---------- auth ----------
     @app.route("/api/auth/signup", methods=["POST"])
     def signup():
-        d = request.get_json(force=True)
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
         role = d.get("role", "candidate")
         if role not in ("candidate", "employer"):
             return jsonify({"error": "role must be candidate or employer"}), 400
@@ -192,10 +222,13 @@ def create_app(db_path=None, testing=False):
 
     @app.route("/api/auth/login", methods=["POST"])
     def login():
-        d = request.get_json(force=True)
-        email = (d.get("email") or "").strip().lower()
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
+        email = d.get("email").strip().lower() if isinstance(d.get("email"), str) else ""
         r = db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        if not r or not check_password_hash(r["password_hash"], d.get("password", "")):
+        pw = d.get("password") if isinstance(d.get("password"), str) else ""
+        if not r or not check_password_hash(r["password_hash"], pw):
             return jsonify({"error": "invalid email or password"}), 401
         session["user_id"] = r["id"]
         return jsonify({"user": _me_payload()})
@@ -213,8 +246,8 @@ def create_app(db_path=None, testing=False):
 
     @app.route("/api/auth/code/request", methods=["POST"])
     def code_request():
-        d = request.get_json(force=True, silent=True) or {}
-        email = (d.get("email") or "").strip().lower()
+        d = _json_body()
+        email = d.get("email").strip().lower() if isinstance(d.get("email"), str) else ""
         if not email or "@" not in email or "." not in email.split("@")[-1]:
             return jsonify({"error": "valid email required"}), 400
         recent = db().execute("SELECT COUNT(*) c FROM login_codes WHERE email=? AND created_at >= datetime('now', ?)",
@@ -239,8 +272,8 @@ def create_app(db_path=None, testing=False):
 
     @app.route("/api/auth/code/verify", methods=["POST"])
     def code_verify():
-        d = request.get_json(force=True, silent=True) or {}
-        email = (d.get("email") or "").strip().lower()
+        d = _json_body()
+        email = d.get("email").strip().lower() if isinstance(d.get("email"), str) else ""
         code = str(d.get("code") or "").strip()
         generic = (jsonify({"error": "invalid or expired code"}), 401)
         if not email or not code:
@@ -266,7 +299,7 @@ def create_app(db_path=None, testing=False):
         created = False
         if not user:
             role = d.get("role") if d.get("role") in ("candidate", "employer") else "candidate"
-            name = (d.get("name") or "").strip() or email.split("@")[0]
+            name = d.get("name").strip() if isinstance(d.get("name"), str) and d.get("name").strip() else email.split("@")[0]
             # Unusable random password: the account is code-login only until the user sets one.
             uid = _insert_user(email, generate_password_hash(secrets.token_urlsafe(32)), role, name, d.get("company", ""))
             created = True
@@ -336,7 +369,8 @@ def create_app(db_path=None, testing=False):
                 return extract_text_from_pdf(data)
             return data.decode("utf-8", errors="ignore")
         if request.is_json and request.get_json(silent=True):
-            return request.get_json().get("text", "")
+            t = request.get_json().get("text", "")
+            return t if isinstance(t, str) else ""
         return request.form.get("text", "") or (request.get_data(as_text=True) or "")
 
     def _request_file_text_and_name():
@@ -389,10 +423,19 @@ def create_app(db_path=None, testing=False):
     @app.route("/api/candidate/preferences", methods=["POST"])
     @login_required("candidate")
     def prefs():
-        d = request.get_json(force=True)
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
         c = my_candidate()
+        for key in ("target_titles", "locations"):
+            if key in d and not isinstance(d[key], list):
+                return jsonify({"error": f"{key} must be a list"}), 400
+        try:
+            min_salary = _coerce_salary(d.get("min_salary")) or 0
+        except (TypeError, ValueError):
+            return jsonify({"error": "min_salary must be a number"}), 400
         db().execute("UPDATE candidates SET target_titles=?,locations=?,remote_only=?,min_salary=? WHERE id=?",
-                     (json.dumps(d.get("target_titles", c["target_titles"])), json.dumps(d.get("locations", c["locations"])), 1 if d.get("remote_only") else 0, int(d.get("min_salary") or 0), c["id"]))
+                     (json.dumps(d.get("target_titles", c["target_titles"])), json.dumps(d.get("locations", c["locations"])), 1 if d.get("remote_only") else 0, min_salary, c["id"]))
         db().commit()
         r = db().execute("SELECT * FROM candidates WHERE id=?", (c["id"],)).fetchone()
         return jsonify(public_candidate(row_to_dict(r)))
@@ -411,9 +454,9 @@ def create_app(db_path=None, testing=False):
         u = g.user
         c = my_candidate()
         if request.method == "POST":
-            d = request.get_json(force=True, silent=True) or {}
-            board = (d.get("board") or "").strip().lower()
-            identifier = (d.get("identifier") or "").strip()
+            d = _json_body()
+            board = d.get("board").strip().lower() if isinstance(d.get("board"), str) else ""
+            identifier = d.get("identifier").strip() if isinstance(d.get("identifier"), str) else ""
             if board not in BOARDS:
                 return jsonify({"error": "board must be linkedin or indeed"}), 400
             if not identifier:
@@ -514,15 +557,15 @@ def create_app(db_path=None, testing=False):
         u = _ext_user()
         if not u:
             return jsonify({"error": "invalid or revoked extension token"}), 401
-        d = request.get_json(force=True, silent=True) or {}
-        event = (d.get("event") or "").strip().lower()
+        d = _json_body()
+        event = d.get("event").strip().lower() if isinstance(d.get("event"), str) else ""
         if event not in ("opened", "filling", "filled", "submitted", "failed", "needs_human"):
             return jsonify({"error": "event must be opened|filling|filled|submitted|failed|needs_human"}), 400
-        r = db().execute("SELECT * FROM applications WHERE id=? AND candidate_id=?", (d.get("application_id"), u["candidate_id"])).fetchone()
+        r = db().execute("SELECT * FROM applications WHERE id=? AND candidate_id=?", (_coerce_id(d.get("application_id")), u["candidate_id"])).fetchone()
         if not r:
             return jsonify({"error": "application not found"}), 404
         app_row = row_to_dict(r)
-        note = (d.get("note") or "").strip()[:500]
+        note = d.get("note").strip()[:500] if isinstance(d.get("note"), str) else ""
         if event == "submitted":
             db().execute("UPDATE applications SET status='submitted', updated_at=datetime('now'), proof=? WHERE id=?",
                          (f"Submitted — confirmed by the SwipeHire extension working in your own logged-in browser.{(' Note: ' + note) if note else ''}", app_row["id"]))
@@ -649,14 +692,17 @@ def create_app(db_path=None, testing=False):
     def documents():
         c = my_candidate()
         if request.method == "POST":
-            doc_type = (request.form.get("doc_type") if not request.is_json else request.get_json(silent=True).get("doc_type")) or "other"
+            jbody = _json_body() if request.is_json else {}
+            doc_type = (jbody.get("doc_type") if request.is_json else request.form.get("doc_type")) or "other"
             if doc_type not in DOC_TYPES:
                 return jsonify({"error": f"doc_type must be one of {DOC_TYPES}"}), 400
             title = ""
             filename = ""
             if request.is_json:
-                d = request.get_json()
-                text, title = d.get("text", ""), d.get("title", "")
+                text = jbody.get("text", "")
+                if not isinstance(text, str):
+                    return jsonify({"error": "text must be a string"}), 400
+                title = jbody.get("title", "") if isinstance(jbody.get("title", ""), str) else ""
             else:
                 title = request.form.get("title", "")
                 text, filename, err = _request_file_text_and_name()
@@ -747,9 +793,11 @@ def create_app(db_path=None, testing=False):
     @app.route("/api/swipe", methods=["POST"])
     @login_required("candidate")
     def swipe():
-        d = request.get_json(force=True)
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
         c = my_candidate()
-        job_r = db().execute("SELECT * FROM jobs WHERE id=?", (d.get("job_id"),)).fetchone()
+        job_r = db().execute("SELECT * FROM jobs WHERE id=?", (_coerce_id(d.get("job_id")),)).fetchone()
         if not job_r:
             return jsonify({"error": "job not found"}), 404
         job = row_to_dict(job_r)
@@ -807,10 +855,19 @@ def create_app(db_path=None, testing=False):
     def employer_jobs():
         emp = my_employer()
         if request.method == "POST":
-            d = request.get_json(force=True)
-            if not d.get("title"):
+            d = _json_body(required=True)
+            if d is None:
+                return jsonify({"error": "JSON object body required"}), 400
+            if not isinstance(d.get("title"), str) or not d["title"]:
                 return jsonify({"error": "title required"}), 400
-            j = {"external_id": f"employer-{emp['id']}-{d['title'][:20].replace(' ', '-').lower()}-{uuid.uuid4().hex[:6]}", "title": d["title"], "company": emp["company"], "location": d.get("location", ""), "remote": 1 if d.get("remote") else 0, "salary_min": d.get("salary_min"), "salary_max": d.get("salary_max"), "salary_text": d.get("salary_text", ""), "description": d.get("description", ""), "url": d.get("url", ""), "source": "employer", "tags": d.get("tags", []), "employer_id": emp["id"]}
+            if "tags" in d and not isinstance(d["tags"], list):
+                return jsonify({"error": "tags must be a list"}), 400
+            try:
+                salary_min = _coerce_salary(d.get("salary_min"))
+                salary_max = _coerce_salary(d.get("salary_max"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "salary_min/salary_max must be numbers"}), 400
+            j = {"external_id": f"employer-{emp['id']}-{d['title'][:20].replace(' ', '-').lower()}-{uuid.uuid4().hex[:6]}", "title": d["title"], "company": emp["company"], "location": d.get("location", ""), "remote": 1 if d.get("remote") else 0, "salary_min": salary_min, "salary_max": salary_max, "salary_text": d.get("salary_text", ""), "description": d.get("description", ""), "url": d.get("url", ""), "source": "employer", "tags": d.get("tags", []), "employer_id": emp["id"]}
             insert_jobs(db(), [j])
             row = db().execute("SELECT * FROM jobs WHERE employer_id=? ORDER BY id DESC LIMIT 1", (emp["id"],)).fetchone()
             return jsonify(row_to_dict(row)), 201
@@ -844,16 +901,18 @@ def create_app(db_path=None, testing=False):
     @app.route("/api/employer/swipe", methods=["POST"])
     @login_required("employer")
     def employer_swipe():
-        d = request.get_json(force=True)
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
         emp = my_employer()
-        job_r = db().execute("SELECT * FROM jobs WHERE id=? AND employer_id=?", (d.get("job_id"), emp["id"])).fetchone()
+        job_r = db().execute("SELECT * FROM jobs WHERE id=? AND employer_id=?", (_coerce_id(d.get("job_id")), emp["id"])).fetchone()
         if not job_r:
             return jsonify({"error": "job not found for this employer"}), 404
         job = row_to_dict(job_r)
         direction = d.get("direction")
         if direction not in ("left", "right"):
             return jsonify({"error": "direction must be left/right"}), 400
-        cand_id = d.get("candidate_id")
+        cand_id = _coerce_id(d.get("candidate_id"))
         if not db().execute("SELECT id FROM candidates WHERE id=?", (cand_id,)).fetchone():
             return jsonify({"error": "candidate not found"}), 404
         db().execute("INSERT OR IGNORE INTO employer_swipes(employer_id,job_id,candidate_id,direction) VALUES(?,?,?,?)", (emp["id"], job["id"], cand_id, direction))
@@ -896,8 +955,10 @@ def create_app(db_path=None, testing=False):
         if not m or (u["role"] == "candidate" and m["candidate_id"] != u["candidate_id"]) or (u["role"] == "employer" and m["employer_id"] != u["employer_id"]):
             return jsonify({"error": "match not found"}), 404
         if request.method == "POST":
-            d = request.get_json(force=True)
-            if not d.get("body"):
+            d = _json_body(required=True)
+            if d is None:
+                return jsonify({"error": "JSON object body required"}), 400
+            if not isinstance(d.get("body"), str) or not d["body"]:
                 return jsonify({"error": "body required"}), 400
             cur = db().execute("INSERT INTO messages(match_id,sender,body) VALUES(?,?,?)", (mid, u["role"], d["body"]))
             db().commit()
