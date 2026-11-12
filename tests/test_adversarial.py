@@ -49,6 +49,13 @@ def _insert_job(app_, url, title="Adv Job"):
     conn.close()
     return d
 
+def give_media(client):
+    """v9/N1: new job posts require media — give this (fresh) employer a
+    recruiter-profile picture first, as a real recruiter would."""
+    r = client.post("/api/employer/logo", data={"file": (io.BytesIO(PNG_BYTES), "logo.png")}, content_type="multipart/form-data")
+    assert r.status_code == 200, r.data
+    return r
+
 def _make_match(app_):
     """Employer (demo) posts a job; demo candidate right-swipes; employer
     right-swipes back. Returns (emp_client, cand_client, job, match_id)."""
@@ -119,6 +126,7 @@ def test_employer_cannot_use_candidate_endpoints(app_, method, url):
 
 def test_employer_b_cannot_touch_employer_a_job(app_):
     a = app_.test_client(); signup(a, "emp-a@x.com", role="employer", company="ACo")
+    give_media(a)  # v9: posting requires recruiter media (or job media)
     job = a.post("/api/employer/jobs", json={"title": "A Private Role", "description": "d", "tags": []}).json
     b = app_.test_client(); signup(b, "emp-b@x.com", role="employer", company="BCo")
     # B's job list does not contain A's job
@@ -228,6 +236,7 @@ def test_preferences_wrong_types_do_not_corrupt(client):
 
 def test_employer_job_wrong_types_do_not_poison_feeds(app_):
     e = app_.test_client(); signup(e, "poison@x.com", role="employer", company="PCo")
+    give_media(e)  # v9: so the one GOOD post below can pass the media rule; the bad ones fail on their own defects first
     assert e.post("/api/employer/jobs", json={"title": "Bad Salary", "salary_max": "xyz"}).status_code == 400
     assert e.post("/api/employer/jobs", json={"title": "Bad Salary 2", "salary_min": [1]}).status_code == 400
     assert e.post("/api/employer/jobs", json={"title": 42}).status_code == 400
@@ -364,6 +373,7 @@ def test_xss_payloads_roundtrip_as_json_strings(app_):
     assert me.content_type.startswith("application/json")
     assert me.json["candidate"]["name"] == XSS  # verbatim data in JSON; UI escapes via esc() in app.js
     e = app_.test_client(); signup(e, "xss-e@x.com", role="employer", company=XSS_IMG)
+    give_media(e)  # v9: posting requires recruiter media (or job media)
     job = e.post("/api/employer/jobs", json={"title": XSS, "description": XSS_IMG, "tags": [XSS]}).json
     assert job["title"] == XSS
     feed = c.get("/api/discovery").json

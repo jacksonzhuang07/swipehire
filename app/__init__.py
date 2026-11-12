@@ -8,15 +8,22 @@ from .mailer import send_signin_code
 from .resume_parser import parse_resume, extract_text_from_pdf
 from .scoring import score_job
 from .job_sources import scan_boards, insert_jobs
-from .apply_engine import apply_for_job, maybe_create_match
+from .apply_engine import apply_for_job, maybe_create_match, maybe_match_from_recruiter_like
+from .job_sources import WORK_MODES
 from .seed_data import seed_all
 from .documents import parse_document_facts, rebuild_master, DOC_TYPES
 from .feed import rank_jobs, rank_candidates_for_job
 from . import storage
 
 PHOTO_EXTS = {".png", ".jpg", ".jpeg"}
+VIDEO_EXTS = {".mp4", ".webm", ".mov"}
 DOC_EXTS = {".txt", ".md", ".pdf"}
 MAX_PHOTO_BYTES = 3 * 1024 * 1024
+MAX_VIDEO_BYTES = 25 * 1024 * 1024
+# Pre-v9 the whole request cap was 8MB (Flask 413'd anything bigger).
+# Videos need up to 25MB, so the global cap is now 32MB and the text
+# endpoints (documents / resume) enforce the old 8MB ceiling themselves.
+LEGACY_TEXT_CAP = 8 * 1024 * 1024
 
 def _db_path():
     if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
@@ -31,7 +38,7 @@ def _uploads_for(db_path, testing):
 def create_app(db_path=None, testing=False):
     app = Flask(__name__)
     app.config["TESTING"] = testing
-    app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+    app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
     _secret = os.environ.get("SWIPEHIRE_SECRET")
     app.secret_key = _secret or "swipehire-dev-secret-change-in-prod"
     app.config["PRODUCTION"] = os.environ.get("SWIPEHIRE_ENV") == "production"
@@ -133,9 +140,53 @@ def create_app(db_path=None, testing=False):
             return None
         c = dict(c)
         c["photo_url"] = storage.display_url(c.get("photo"))
+        c["video_url"] = storage.display_url(c.get("video"))
         c.pop("resume_text", None)
         c.pop("compiled_resume", None)
         return c
+
+    def employer_media(e):
+        """Effective recruiter-profile media (v9/N1): a profile VIDEO wins
+        over the picture, per the card rule 'video when present, image
+        otherwise'. Returns (name, kind) or (None, '')."""
+        if e.get("video"):
+            return e["video"], "video"
+        if e.get("logo"):
+            return e["logo"], "image"
+        return None, ""
+
+    def employer_payload(e):
+        """Employer dict as shipped to clients, with media + like counts."""
+        if not e:
+            return None
+        e = dict(e)
+        e["logo_url"] = storage.display_url(e.get("logo"))
+        e["video_url"] = storage.display_url(e.get("video"))
+        name, kind = employer_media(e)
+        e["media_url"] = storage.display_url(name)
+        e["media_type"] = kind
+        e["has_media"] = bool(name)
+        # N2 (per-entity like counts): recruiter PROFILE likes = candidate
+        # right-swipes on the recruiter card itself.
+        e["likes_count"] = db().execute(
+            "SELECT COUNT(*) c FROM recruiter_swipes WHERE employer_id=? AND direction='right'",
+            (e["id"],)).fetchone()["c"]
+        return e
+
+    def job_media_fields(j, emp_media=None):
+        """Effective media for a job dict: the job's own media wins, else
+        it inherits the owning recruiter profile's media (v9/N1)."""
+        if j.get("media"):
+            return storage.display_url(j["media"]), j.get("media_type") or ""
+        if emp_media and emp_media[0]:
+            return storage.display_url(emp_media[0]), emp_media[1]
+        return "", ""
+
+    def _employer_media_map():
+        out = {}
+        for r in db().execute("SELECT id, logo, video FROM employers").fetchall():
+            out[r["id"]] = employer_media(row_to_dict(r))
+        return out
 
     def _insert_user(email, password_hash, role, name, company=""):
         cand_id = emp_id = None
@@ -192,7 +243,10 @@ def create_app(db_path=None, testing=False):
         # token and stream the bytes to this session-authorized user.
         # Local backend: serve the file from disk, as before.
         for sql in ("SELECT photo_blob_url u FROM candidates WHERE photo=?",
-                    "SELECT logo_blob_url u FROM employers WHERE logo=?"):
+                    "SELECT video_blob_url u FROM candidates WHERE video=?",
+                    "SELECT logo_blob_url u FROM employers WHERE logo=?",
+                    "SELECT video_blob_url u FROM employers WHERE video=?",
+                    "SELECT media_blob_url u FROM jobs WHERE media=?"):
             r = db().execute(sql, (name,)).fetchone()
             if r and r["u"]:
                 try:
@@ -316,13 +370,17 @@ def create_app(db_path=None, testing=False):
         payload = {"id": u["id"], "email": u["email"], "role": u["role"], "name": u["name"]}
         if u.get("candidate_id"):
             r = db().execute("SELECT * FROM candidates WHERE id=?", (u["candidate_id"],)).fetchone()
-            payload["candidate"] = public_candidate(row_to_dict(r))
+            cand = public_candidate(row_to_dict(r))
+            if cand:
+                # N2: candidate PROFILE likes = recruiter right-swipes
+                # received (job-context employer right-swipes).
+                cand["likes_count"] = db().execute(
+                    "SELECT COUNT(*) c FROM employer_swipes WHERE candidate_id=? AND direction='right'",
+                    (cand["id"],)).fetchone()["c"]
+            payload["candidate"] = cand
         if u.get("employer_id"):
             r = db().execute("SELECT * FROM employers WHERE id=?", (u["employer_id"],)).fetchone()
-            e = row_to_dict(r)
-            if e:
-                e["logo_url"] = storage.display_url(e.get("logo"))
-            payload["employer"] = e
+            payload["employer"] = employer_payload(row_to_dict(r))
         return payload
 
     @app.route("/api/demo-accounts")
@@ -350,6 +408,8 @@ def create_app(db_path=None, testing=False):
     @app.route("/api/resume", methods=["POST"])
     @login_required("candidate")
     def upload_resume():
+        if request.content_length and request.content_length > LEGACY_TEXT_CAP:
+            return jsonify({"error": "file too large (max 8MB)"}), 413
         c = my_candidate()
         text = _request_text()
         if not text or not text.strip():
@@ -387,38 +447,72 @@ def create_app(db_path=None, testing=False):
     @app.route("/api/profile/photo", methods=["POST"])
     @login_required("candidate")
     def upload_photo():
-        return _save_image("candidates", "photo", my_candidate()["id"])
+        return _save_profile_media("candidates", my_candidate()["id"])
 
     @app.route("/api/employer/logo", methods=["POST"])
     @login_required("employer")
     def upload_logo():
-        return _save_image("employers", "logo", my_employer()["id"])
+        return _save_profile_media("employers", my_employer()["id"])
 
-    def _save_image(table, column, row_id):
-        if "file" not in request.files or not request.files["file"].filename:
-            return jsonify({"error": "file required"}), 400
-        f = request.files["file"]
-        ext = os.path.splitext(f.filename.lower())[1]
+    def _media_kind_and_check(ext, data):
+        """Validate an uploaded media file by extension + magic bytes.
+        Returns (kind, error_response): kind is 'image' or 'video'."""
+        if ext in PHOTO_EXTS:
+            if len(data) > MAX_PHOTO_BYTES:
+                return None, (jsonify({"error": "image too large (max 3MB)"}), 413)
+            if not (data.startswith(b"\x89PNG") or data.startswith(b"\xff\xd8\xff")):
+                return None, (jsonify({"error": "file is not a real PNG/JPEG image"}), 400)
+            return "image", None
+        if ext in VIDEO_EXTS:
+            if len(data) > MAX_VIDEO_BYTES:
+                return None, (jsonify({"error": "video too large (max 25MB)"}), 413)
+            if ext == ".webm":
+                ok = data.startswith(b"\x1a\x45\xdf\xa3")
+            else:  # .mp4 / .mov: ISO-BMFF 'ftyp' box at offset 4
+                ok = len(data) > 8 and data[4:8] == b"ftyp"
+            if not ok:
+                return None, (jsonify({"error": "file is not a real video of that type"}), 400)
+            return "video", None
+        return None, (jsonify({"error": "only .png/.jpg images or .mp4/.webm/.mov videos allowed"}), 400)
+
+    def _store_media_file(f, prefix):
+        """Validate + persist one uploaded media file through the storage
+        layer. Returns (name, blob_url, kind, error_response)."""
+        ext = os.path.splitext((f.filename or "").lower())[1]
         if ext == ".jpeg":
             ext = ".jpg"
-        if ext not in PHOTO_EXTS:
-            return jsonify({"error": "only .png/.jpg images allowed"}), 400
         data = f.read()
-        if len(data) > MAX_PHOTO_BYTES:
-            return jsonify({"error": "image too large (max 3MB)"}), 413
-        if not (data.startswith(b"\x89PNG") or data.startswith(b"\xff\xd8\xff")):
-            return jsonify({"error": "file is not a real PNG/JPEG image"}), 400
+        if not data:
+            return None, None, None, (jsonify({"error": "empty file"}), 400)
+        kind, err = _media_kind_and_check(ext, data)
+        if err:
+            return None, None, None, err
+        name = f"{prefix}_{uuid.uuid4().hex[:10]}{ext}"
+        if kind == "image":
+            ctype = "image/png" if ext == ".png" else "image/jpeg"
+        else:
+            ctype = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"}[ext]
+        blob_url = storage.save_upload(app.config["UPLOADS_DIR"], name, data, ctype)
+        return name, blob_url or "", kind, None
+
+    def _save_profile_media(table, row_id):
+        """Candidate photo/video and recruiter logo/video share one shape:
+        an IMAGE lands in photo|logo (+_blob_url), a VIDEO in video
+        (+video_blob_url). Replacing a file cleans up the old object."""
+        if "file" not in request.files or not request.files["file"].filename:
+            return jsonify({"error": "file required"}), 400
+        img_col = "photo" if table == "candidates" else "logo"
+        name, blob_url, kind, err = _store_media_file(request.files["file"], f"{table}_{row_id}")
+        if err:
+            return err
+        column = img_col if kind == "image" else "video"
         blob_col = f"{column}_blob_url"
         old = db().execute(f"SELECT {column}, {blob_col} FROM {table} WHERE id=?", (row_id,)).fetchone()
-        name = f"{table}_{row_id}_{uuid.uuid4().hex[:10]}{ext}"
-        blob_url = storage.save_upload(app.config["UPLOADS_DIR"], name, data,
-                                       "image/png" if ext == ".png" else "image/jpeg")
-        db().execute(f"UPDATE {table} SET {column}=?, {blob_col}=? WHERE id=?", (name, blob_url or "", row_id))
+        db().execute(f"UPDATE {table} SET {column}=?, {blob_col}=? WHERE id=?", (name, blob_url, row_id))
         db().commit()
         if old and old[column] and old[column] != name:
-            # Replaced image: best-effort cleanup of the previous object.
             storage.delete_upload(app.config["UPLOADS_DIR"], name=old[column], blob_url=old[blob_col])
-        return jsonify({"ok": True, "url": storage.display_url(name), "filename": name})
+        return jsonify({"ok": True, "url": storage.display_url(name), "filename": name, "media_type": kind})
 
     @app.route("/api/candidate/preferences", methods=["POST"])
     @login_required("candidate")
@@ -621,15 +715,21 @@ def create_app(db_path=None, testing=False):
         # best-effort and never blocks the account deletion.
         doomed_uploads = []
         if cand_id:
-            r = conn.execute("SELECT photo, photo_blob_url FROM candidates WHERE id=?", (cand_id,)).fetchone()
+            r = conn.execute("SELECT photo, photo_blob_url, video, video_blob_url FROM candidates WHERE id=?", (cand_id,)).fetchone()
             if r and r["photo"]:
                 doomed_uploads.append((r["photo"], r["photo_blob_url"]))
+            if r and r["video"]:
+                doomed_uploads.append((r["video"], r["video_blob_url"]))
             doomed_uploads += [(None, r["blob_url"]) for r in
                                conn.execute("SELECT blob_url FROM documents WHERE candidate_id=? AND blob_url != ''", (cand_id,)).fetchall()]
         if emp_id:
-            r = conn.execute("SELECT logo, logo_blob_url FROM employers WHERE id=?", (emp_id,)).fetchone()
+            r = conn.execute("SELECT logo, logo_blob_url, video, video_blob_url FROM employers WHERE id=?", (emp_id,)).fetchone()
             if r and r["logo"]:
                 doomed_uploads.append((r["logo"], r["logo_blob_url"]))
+            if r and r["video"]:
+                doomed_uploads.append((r["video"], r["video_blob_url"]))
+            doomed_uploads += [(r["media"], r["media_blob_url"]) for r in
+                               conn.execute("SELECT media, media_blob_url FROM jobs WHERE employer_id=? AND media != ''", (emp_id,)).fetchall()]
         match_ids = set()
         if cand_id:
             match_ids |= {r["id"] for r in conn.execute("SELECT id FROM matches WHERE candidate_id=?", (cand_id,)).fetchall()}
@@ -640,6 +740,7 @@ def create_app(db_path=None, testing=False):
         if cand_id:
             conn.execute("DELETE FROM matches WHERE candidate_id=?", (cand_id,))
             conn.execute("DELETE FROM employer_swipes WHERE candidate_id=?", (cand_id,))
+            conn.execute("DELETE FROM recruiter_swipes WHERE candidate_id=?", (cand_id,))
             conn.execute("DELETE FROM swipes WHERE candidate_id=?", (cand_id,))
             conn.execute("DELETE FROM applications WHERE candidate_id=?", (cand_id,))
             conn.execute("DELETE FROM documents WHERE candidate_id=?", (cand_id,))
@@ -647,6 +748,7 @@ def create_app(db_path=None, testing=False):
         if emp_id:
             conn.execute("DELETE FROM matches WHERE employer_id=?", (emp_id,))
             conn.execute("DELETE FROM employer_swipes WHERE employer_id=?", (emp_id,))
+            conn.execute("DELETE FROM recruiter_swipes WHERE employer_id=?", (emp_id,))
             job_ids = [r["id"] for r in conn.execute("SELECT id FROM jobs WHERE employer_id=?", (emp_id,)).fetchall()]
             for jid in job_ids:
                 conn.execute("DELETE FROM swipes WHERE job_id=?", (jid,))
@@ -692,6 +794,8 @@ def create_app(db_path=None, testing=False):
     def documents():
         c = my_candidate()
         if request.method == "POST":
+            if request.content_length and request.content_length > LEGACY_TEXT_CAP:
+                return jsonify({"error": "file too large (max 8MB)"}), 413
             jbody = _json_body() if request.is_json else {}
             doc_type = (jbody.get("doc_type") if request.is_json else request.form.get("doc_type")) or "other"
             if doc_type not in DOC_TYPES:
@@ -780,11 +884,30 @@ def create_app(db_path=None, testing=False):
     @login_required("candidate")
     def discovery():
         c = my_candidate()
+        # v9/N5: HARD filters (query params) applied before ranking —
+        # q: keyword across title/company/tags/description; location:
+        # substring of the job's location; work_mode: exact match.
+        q = (request.args.get("q") or "").strip().lower()
+        loc = (request.args.get("location") or "").strip().lower()
+        mode = (request.args.get("work_mode") or "").strip().lower()
+        if mode and mode not in ("remote", "hybrid", "in_person", "unspecified"):
+            return jsonify({"error": "work_mode must be remote|hybrid|in_person|unspecified"}), 400
         rows = db().execute("SELECT * FROM jobs WHERE id NOT IN (SELECT job_id FROM swipes WHERE candidate_id=?)", (c["id"],)).fetchall()
+        emp_media = _employer_media_map()
         out = []
         for r in rows:
             j = row_to_dict(r)
+            if mode and (j.get("work_mode") or "unspecified") != mode:
+                continue
+            if loc and loc not in (j.get("location") or "").lower():
+                continue
+            if q:
+                hay = " ".join([j.get("title") or "", j.get("company") or "",
+                                j.get("description") or "", " ".join(j.get("tags") or [])]).lower()
+                if q not in hay:
+                    continue
             j.update(score_job(c, j))
+            j["media_url"], j["media_type"] = job_media_fields(j, emp_media.get(j.get("employer_id")))
             out.append(j)
         right_jobs = [row_to_dict(r) for r in db().execute("SELECT j.* FROM jobs j JOIN swipes s ON s.job_id=j.id WHERE s.candidate_id=? AND s.direction='right'", (c["id"],)).fetchall()]
         left_jobs = [row_to_dict(r) for r in db().execute("SELECT j.* FROM jobs j JOIN swipes s ON s.job_id=j.id WHERE s.candidate_id=? AND s.direction='left'", (c["id"],)).fetchall()]
@@ -817,6 +940,84 @@ def create_app(db_path=None, testing=False):
             if m:
                 result["match"] = m
         return jsonify(result)
+
+    # ---------- v9/N4: recruiter deck + v9/N2: like counts ----------
+    @app.route("/api/recruiters")
+    @login_required("candidate")
+    def recruiters():
+        """Ranked recruiter (employer) cards for this candidate: only
+        employers with at least one open job, minus recruiters the
+        candidate already swiped (either direction). Ranking: skill
+        overlap with the employer's open jobs first, then open-job
+        count — deterministic, no swipe-history leakage across users."""
+        c = my_candidate()
+        cand_skills = {s.lower() for s in (c.get("skills") or [])}
+        swiped = {r["employer_id"] for r in db().execute(
+            "SELECT employer_id FROM recruiter_swipes WHERE candidate_id=?", (c["id"],)).fetchall()}
+        out = []
+        for r in db().execute("SELECT * FROM employers ORDER BY id").fetchall():
+            e = row_to_dict(r)
+            if e["id"] in swiped:
+                continue
+            jobs = [row_to_dict(j) for j in db().execute(
+                "SELECT * FROM jobs WHERE employer_id=? ORDER BY id DESC", (e["id"],)).fetchall()]
+            if not jobs:
+                continue
+            tags = set()
+            for j in jobs:
+                tags |= {t.lower() for t in (j.get("tags") or [])}
+            overlap = sorted(cand_skills & tags)
+            payload = employer_payload(e)
+            why = []
+            if overlap:
+                why.append(f"Hiring for your skills: {', '.join(overlap[:3])}")
+            why.append(f"{len(jobs)} open role{'s' if len(jobs) != 1 else ''} at {e['company']}")
+            payload.update({
+                "employer_id": e["id"],
+                "open_jobs": len(jobs),
+                "job_titles": [j["title"] for j in jobs[:3]],
+                "matched_skills": overlap,
+                "feed_score": round(len(overlap) * 10 + min(len(jobs), 5), 1),
+                "why": why[:3],
+            })
+            out.append(payload)
+        out.sort(key=lambda x: -x["feed_score"])
+        return jsonify(out)
+
+    @app.route("/api/recruiter-swipe", methods=["POST"])
+    @login_required("candidate")
+    def recruiter_swipe():
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
+        c = my_candidate()
+        emp_id = _coerce_id(d.get("employer_id"))
+        if not db().execute("SELECT id FROM employers WHERE id=?", (emp_id,)).fetchone():
+            return jsonify({"error": "recruiter not found"}), 404
+        direction = d.get("direction")
+        if direction not in ("left", "right"):
+            return jsonify({"error": "direction must be left/right"}), 400
+        db().execute("INSERT OR IGNORE INTO recruiter_swipes(candidate_id,employer_id,direction) VALUES(?,?,?)",
+                     (c["id"], emp_id, direction))
+        db().commit()
+        result = {"swipe": direction}
+        if direction == "right":
+            # Mutual like via the recruiter card? A match forms on a job —
+            # but a recruiter like NEVER creates an application.
+            m = maybe_match_from_recruiter_like(db(), c["id"], emp_id)
+            if m:
+                result["match"] = m
+        return jsonify(result)
+
+    @app.route("/api/me/likes")
+    @login_required("candidate")
+    def my_likes():
+        """v9/N2: this candidate profile's received-like count =
+        recruiter (job-context) right-swipes received."""
+        c = my_candidate()
+        n = db().execute("SELECT COUNT(*) c FROM employer_swipes WHERE candidate_id=? AND direction='right'",
+                         (c["id"],)).fetchone()["c"]
+        return jsonify({"likes": n, "likes_count": n})
 
     @app.route("/api/applications")
     @login_required("candidate")
@@ -855,9 +1056,22 @@ def create_app(db_path=None, testing=False):
     def employer_jobs():
         emp = my_employer()
         if request.method == "POST":
-            d = _json_body(required=True)
-            if d is None:
-                return jsonify({"error": "JSON object body required"}), 400
+            # Two shapes: JSON (as before) or multipart form (when a media
+            # file is attached to the posting, v9/N1).
+            if request.files and "media" in request.files or request.form:
+                form = request.form
+                tags_raw = form.get("tags", "")
+                d = {"title": form.get("title", ""), "location": form.get("location", ""),
+                     "description": form.get("description", ""), "url": form.get("url", ""),
+                     "salary_text": form.get("salary_text", ""),
+                     "salary_min": form.get("salary_min"), "salary_max": form.get("salary_max"),
+                     "remote": form.get("remote") in ("1", "true", "on", "yes"),
+                     "work_mode": form.get("work_mode", ""),
+                     "tags": [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []}
+            else:
+                d = _json_body(required=True)
+                if d is None:
+                    return jsonify({"error": "JSON object body required"}), 400
             if not isinstance(d.get("title"), str) or not d["title"]:
                 return jsonify({"error": "title required"}), 400
             if "tags" in d and not isinstance(d["tags"], list):
@@ -867,12 +1081,71 @@ def create_app(db_path=None, testing=False):
                 salary_max = _coerce_salary(d.get("salary_max"))
             except (TypeError, ValueError):
                 return jsonify({"error": "salary_min/salary_max must be numbers"}), 400
-            j = {"external_id": f"employer-{emp['id']}-{d['title'][:20].replace(' ', '-').lower()}-{uuid.uuid4().hex[:6]}", "title": d["title"], "company": emp["company"], "location": d.get("location", ""), "remote": 1 if d.get("remote") else 0, "salary_min": salary_min, "salary_max": salary_max, "salary_text": d.get("salary_text", ""), "description": d.get("description", ""), "url": d.get("url", ""), "source": "employer", "tags": d.get("tags", []), "employer_id": emp["id"]}
+            work_mode = d.get("work_mode") if isinstance(d.get("work_mode"), str) else ""
+            work_mode = work_mode.strip().lower()
+            if work_mode and work_mode not in WORK_MODES:
+                return jsonify({"error": "work_mode must be remote|hybrid|in_person|unspecified"}), 400
+            # v9/N1 MANDATORY MEDIA (D1): a job may only be published with a
+            # picture or a video — attached to this posting, or inherited
+            # from the recruiter profile. Pre-existing (seeded/imported)
+            # jobs are grandfathered; this rule governs new posts only.
+            media_file = request.files.get("media") if request.files else None
+            has_attached = bool(media_file and media_file.filename)
+            emp = my_employer()  # fresh row: media may have just been set
+            if not has_attached and not employer_media(emp)[0]:
+                return jsonify({"error": "media required: attach a picture or video to this job, or add one to your recruiter profile first — jobs cannot be published without media"}), 400
+            remote = 1 if d.get("remote") else 0
+            if work_mode == "remote":
+                remote = 1
+            elif work_mode in ("hybrid", "in_person"):
+                remote = 0
+            j = {"external_id": f"employer-{emp['id']}-{d['title'][:20].replace(' ', '-').lower()}-{uuid.uuid4().hex[:6]}", "title": d["title"], "company": emp["company"], "location": d.get("location", "") if isinstance(d.get("location"), str) else "", "remote": remote, "work_mode": work_mode or None, "salary_min": salary_min, "salary_max": salary_max, "salary_text": d.get("salary_text", "") if isinstance(d.get("salary_text"), str) else "", "description": d.get("description", "") if isinstance(d.get("description"), str) else "", "url": d.get("url", "") if isinstance(d.get("url"), str) else "", "source": "employer", "tags": d.get("tags", []), "employer_id": emp["id"]}
             insert_jobs(db(), [j])
             row = db().execute("SELECT * FROM jobs WHERE employer_id=? ORDER BY id DESC LIMIT 1", (emp["id"],)).fetchone()
-            return jsonify(row_to_dict(row)), 201
+            job = row_to_dict(row)
+            if has_attached:
+                name, blob_url, kind, err = _store_media_file(media_file, f"jobs_{job['id']}")
+                if err:
+                    return err
+                db().execute("UPDATE jobs SET media=?, media_blob_url=?, media_type=? WHERE id=?", (name, blob_url, kind, job["id"]))
+                db().commit()
+                job = row_to_dict(db().execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone())
+            job["media_url"], job["media_type"] = job_media_fields(job, employer_media(emp))
+            job["likes_count"] = 0
+            return jsonify(job), 201
         rows = db().execute("SELECT * FROM jobs WHERE employer_id=? ORDER BY id DESC", (emp["id"],)).fetchall()
-        return jsonify([row_to_dict(r) for r in rows])
+        emp_m = employer_media(emp)
+        out = []
+        for r in rows:
+            j = row_to_dict(r)
+            # v9/N2: per-JOB like count = candidate right-swipes on this job.
+            j["likes_count"] = db().execute(
+                "SELECT COUNT(*) c FROM swipes WHERE job_id=? AND direction='right'", (j["id"],)).fetchone()["c"]
+            j["media_url"], j["media_type"] = job_media_fields(j, emp_m)
+            out.append(j)
+        return jsonify(out)
+
+    @app.route("/api/employer/jobs/<int:jid>/media", methods=["POST"])
+    @login_required("employer")
+    def employer_job_media(jid):
+        """Attach/replace a picture or video on one of my job postings."""
+        emp = my_employer()
+        row = db().execute("SELECT * FROM jobs WHERE id=? AND employer_id=?", (jid, emp["id"])).fetchone()
+        if not row:
+            return jsonify({"error": "job not found for this employer"}), 404
+        if "file" not in request.files or not request.files["file"].filename:
+            return jsonify({"error": "file required"}), 400
+        name, blob_url, kind, err = _store_media_file(request.files["file"], f"jobs_{jid}")
+        if err:
+            return err
+        old = row_to_dict(row)
+        db().execute("UPDATE jobs SET media=?, media_blob_url=?, media_type=? WHERE id=?", (name, blob_url, kind, jid))
+        db().commit()
+        if old.get("media") and old["media"] != name:
+            storage.delete_upload(app.config["UPLOADS_DIR"], name=old["media"], blob_url=old.get("media_blob_url"))
+        job = row_to_dict(db().execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
+        job["media_url"], job["media_type"] = job_media_fields(job, employer_media(emp))
+        return jsonify({"ok": True, "media_url": job["media_url"], "media_type": kind, "job": job})
 
     @app.route("/api/employer/candidates")
     @login_required("employer")
@@ -926,6 +1199,12 @@ def create_app(db_path=None, testing=False):
                 db().commit()
                 m = db().execute("SELECT * FROM matches WHERE candidate_id=? AND job_id=?", (cand_id, job["id"])).fetchone()
                 result["match"] = row_to_dict(m)
+            else:
+                # v9/N4: the candidate liked the RECRUITER profile itself —
+                # that mutual like also matches, on this job.
+                m = maybe_match_from_recruiter_like(db(), cand_id, emp["id"], job_id=job["id"])
+                if m:
+                    result["match"] = m
         return jsonify(result)
 
     # ---------- matches / messages ----------

@@ -117,3 +117,27 @@ def maybe_create_match(conn, candidate_id, job_id):
     m = conn.execute("SELECT * FROM matches WHERE candidate_id=? AND job_id=?", (candidate_id, job_id)).fetchone()
     from .db import row_to_dict
     return row_to_dict(m)
+
+def maybe_match_from_recruiter_like(conn, candidate_id, employer_id, job_id=None):
+    """v9/N4: a candidate right-swipe on the RECRUITER (profile) plus an
+    employer right-swipe on that candidate (for any of their jobs) is a
+    mutual like — create the match on a job. With job_id given (employer
+    just swiped that job) the match lands on it; without (candidate just
+    liked the recruiter) it lands on the earliest job the employer
+    right-swiped this candidate for. A recruiter like NEVER creates an
+    application by itself."""
+    liked = conn.execute("SELECT id FROM recruiter_swipes WHERE candidate_id=? AND employer_id=? AND direction='right'",
+                         (candidate_id, employer_id)).fetchone()
+    if not liked:
+        return None
+    if job_id is None:
+        es = conn.execute("SELECT job_id FROM employer_swipes WHERE candidate_id=? AND employer_id=? AND direction='right' ORDER BY id LIMIT 1",
+                          (candidate_id, employer_id)).fetchone()
+        if not es:
+            return None
+        job_id = es["job_id"]
+    conn.execute("INSERT OR IGNORE INTO matches(candidate_id,employer_id,job_id) VALUES(?,?,?)", (candidate_id, employer_id, job_id))
+    conn.commit()
+    m = conn.execute("SELECT * FROM matches WHERE candidate_id=? AND job_id=?", (candidate_id, job_id)).fetchone()
+    from .db import row_to_dict
+    return row_to_dict(m)

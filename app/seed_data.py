@@ -1,4 +1,4 @@
-import json, os, shutil
+import json, os, shutil, struct, zlib
 from werkzeug.security import generate_password_hash
 from .resume_parser import parse_resume, extract_text_from_pdf
 from .job_sources import insert_jobs, seed_jobs
@@ -60,6 +60,40 @@ def _seed_jackson_photo(conn, candidate_id, uploads_dir):
     except Exception:
         pass
 
+def _solid_png(width, height, rgb):
+    """A tiny valid solid-colour PNG built with stdlib only (demo media)."""
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    raw = b""
+    row = b"\x00" + bytes(rgb) * width
+    for _ in range(height):
+        raw += row
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+def _seed_demo_employer_media(conn, emp_id, uploads_dir):
+    """v9/N1: media (picture or video) is mandatory on recruiter profiles
+    for NEW job posts. Give the demo employer a generated placeholder
+    picture at seed time so the demo account satisfies the rule the same
+    way a real recruiter who uploaded a logo does."""
+    if not uploads_dir:
+        return
+    row = conn.execute("SELECT logo, video FROM employers WHERE id=?", (emp_id,)).fetchone()
+    if not row or row["logo"] or row["video"]:
+        return
+    try:
+        name = "seed_demo_employer.png"
+        dest = os.path.join(uploads_dir, name)
+        if not os.path.exists(dest):
+            with open(dest, "wb") as f:
+                f.write(_solid_png(480, 360, (253, 38, 122)))
+        conn.execute("UPDATE employers SET logo=? WHERE id=?", (name, emp_id))
+        conn.commit()
+    except Exception:
+        pass
+
 def seed_all(conn, uploads_dir=None):
     insert_jobs(conn, seed_jobs())
     # Jackson from real resume file if present — no invented facts, parse only.
@@ -96,6 +130,7 @@ def seed_all(conn, uploads_dir=None):
         conn.commit()
         emp_id = cur.lastrowid
     _ensure_user(conn, "employer@swipehire.app", "employer", "Demo Hiring Manager", employer_id=emp_id)
+    _seed_demo_employer_media(conn, emp_id, uploads_dir)
     # Showcase jobs owned by the demo employer so the employer side works on
     # first login (feed, swiping, matches). Stable external_ids keep this
     # idempotent; the UPDATE repairs databases seeded before this existed.
