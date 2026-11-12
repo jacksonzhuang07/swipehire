@@ -275,6 +275,27 @@ def seed_jobs():
         out.append({"external_id": f"seed-{i}", "title": title, "company": company, "location": loc, "remote": remote, "salary_min": smin, "salary_max": smax, "salary_text": stext, "description": desc, "url": "", "source": "seeded", "tags": tags, "posted_at": ""})
     return out
 
+WORK_MODES = ("remote", "hybrid", "in_person", "unspecified")
+
+def derive_work_mode(j):
+    """v9/N3: distinguish remote / hybrid / in-person from the signals a
+    source actually provides. An explicit valid work_mode wins; then the
+    remote flag; then a 'hybrid' mention in location/title/description;
+    then a non-remote job with a real location is in-person; anything
+    else stays unspecified (never guessed)."""
+    wm = (j.get("work_mode") or "").strip().lower() if isinstance(j.get("work_mode"), str) else ""
+    if wm in WORK_MODES and wm != "unspecified":
+        return wm
+    if j.get("remote"):
+        return "remote"
+    loc = (j.get("location") or "").strip()
+    hay = " ".join([loc, j.get("title") or "", j.get("description") or ""]).lower()
+    if "hybrid" in hay:
+        return "hybrid"
+    if loc and loc.lower() not in ("unspecified", "remote", "anywhere", "unknown"):
+        return "in_person"
+    return "unspecified"
+
 def insert_jobs(conn, jobs):
     new = 0
     for j in jobs:
@@ -282,8 +303,8 @@ def insert_jobs(conn, jobs):
             continue
         from .classify import classify_job
         _at, _rl = classify_job(j.get("url", ""))
-        cur = conn.execute("INSERT OR IGNORE INTO jobs(external_id,title,company,location,remote,salary_min,salary_max,salary_text,description,url,source,tags,employer_id,posted_at,apply_type,requires_login) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (j["external_id"], j["title"], j["company"], j.get("location", ""), int(j.get("remote") or 0), j.get("salary_min"), j.get("salary_max"), j.get("salary_text", ""), j.get("description", ""), j.get("url", ""), j["source"], json.dumps(j.get("tags", [])), j.get("employer_id"), j.get("posted_at", "") or "", _at, _rl))
+        cur = conn.execute("INSERT OR IGNORE INTO jobs(external_id,title,company,location,remote,work_mode,salary_min,salary_max,salary_text,description,url,source,tags,employer_id,posted_at,apply_type,requires_login) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (j["external_id"], j["title"], j["company"], j.get("location", ""), int(j.get("remote") or 0), derive_work_mode(j), j.get("salary_min"), j.get("salary_max"), j.get("salary_text", ""), j.get("description", ""), j.get("url", ""), j["source"], json.dumps(j.get("tags", [])), j.get("employer_id"), j.get("posted_at", "") or "", _at, _rl))
         new += cur.rowcount
     conn.commit()
     return new

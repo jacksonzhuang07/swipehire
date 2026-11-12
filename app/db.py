@@ -141,9 +141,10 @@ def get_conn(path=None):
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'candidate',name TEXT DEFAULT '',candidate_id INTEGER,employer_id INTEGER,is_demo INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS candidates(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,email TEXT,phone TEXT,title TEXT,skills TEXT DEFAULT '[]',years_exp REAL DEFAULT 0,summary TEXT,resume_text TEXT,is_demo INTEGER DEFAULT 0,target_titles TEXT DEFAULT '[]',locations TEXT DEFAULT '[]',remote_only INTEGER DEFAULT 0,min_salary INTEGER DEFAULT 0,user_id INTEGER,photo TEXT DEFAULT '',photo_blob_url TEXT DEFAULT '',master_profile TEXT DEFAULT '{}',compiled_resume TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS employers(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,company TEXT NOT NULL,email TEXT,user_id INTEGER,logo TEXT DEFAULT '',logo_blob_url TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,external_id TEXT NOT NULL,title TEXT NOT NULL,company TEXT NOT NULL,location TEXT DEFAULT '',remote INTEGER DEFAULT 0,salary_min INTEGER,salary_max INTEGER,salary_text TEXT DEFAULT '',description TEXT DEFAULT '',url TEXT DEFAULT '',source TEXT NOT NULL,tags TEXT DEFAULT '[]',employer_id INTEGER,posted_at TEXT DEFAULT '',apply_type TEXT DEFAULT 'external',requires_login INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')),UNIQUE(source,external_id));
+CREATE TABLE IF NOT EXISTS candidates(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,email TEXT,phone TEXT,title TEXT,skills TEXT DEFAULT '[]',years_exp REAL DEFAULT 0,summary TEXT,resume_text TEXT,is_demo INTEGER DEFAULT 0,target_titles TEXT DEFAULT '[]',locations TEXT DEFAULT '[]',remote_only INTEGER DEFAULT 0,min_salary INTEGER DEFAULT 0,user_id INTEGER,photo TEXT DEFAULT '',photo_blob_url TEXT DEFAULT '',video TEXT DEFAULT '',video_blob_url TEXT DEFAULT '',master_profile TEXT DEFAULT '{}',compiled_resume TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS employers(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,company TEXT NOT NULL,email TEXT,user_id INTEGER,logo TEXT DEFAULT '',logo_blob_url TEXT DEFAULT '',video TEXT DEFAULT '',video_blob_url TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,external_id TEXT NOT NULL,title TEXT NOT NULL,company TEXT NOT NULL,location TEXT DEFAULT '',remote INTEGER DEFAULT 0,work_mode TEXT DEFAULT 'unspecified',media TEXT DEFAULT '',media_blob_url TEXT DEFAULT '',media_type TEXT DEFAULT '',salary_min INTEGER,salary_max INTEGER,salary_text TEXT DEFAULT '',description TEXT DEFAULT '',url TEXT DEFAULT '',source TEXT NOT NULL,tags TEXT DEFAULT '[]',employer_id INTEGER,posted_at TEXT DEFAULT '',apply_type TEXT DEFAULT 'external',requires_login INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')),UNIQUE(source,external_id));
+CREATE TABLE IF NOT EXISTS recruiter_swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,employer_id INTEGER NOT NULL,direction TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,employer_id));
 CREATE TABLE IF NOT EXISTS swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,job_id INTEGER NOT NULL,direction TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,job_id));
 CREATE TABLE IF NOT EXISTS applications(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,job_id INTEGER NOT NULL,status TEXT NOT NULL,method TEXT NOT NULL,proof TEXT DEFAULT '',answers TEXT DEFAULT '{}',needs_review TEXT DEFAULT '[]',tailored_resume TEXT DEFAULT '',coverage TEXT DEFAULT '{}',tailored INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,job_id));
 CREATE TABLE IF NOT EXISTS employer_swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,employer_id INTEGER NOT NULL,job_id INTEGER NOT NULL,candidate_id INTEGER NOT NULL,direction TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(employer_id,job_id,candidate_id));
@@ -173,6 +174,15 @@ _MIGRATIONS = [
     ("applications", "tailored_resume", "TEXT DEFAULT ''"),
     ("applications", "coverage", "TEXT DEFAULT '{}'"),
     ("applications", "tailored", "INTEGER DEFAULT 0"),
+    # v9 (feature amendments N1/N3): profile videos, job work_mode + media.
+    ("candidates", "video", "TEXT DEFAULT ''"),
+    ("candidates", "video_blob_url", "TEXT DEFAULT ''"),
+    ("employers", "video", "TEXT DEFAULT ''"),
+    ("employers", "video_blob_url", "TEXT DEFAULT ''"),
+    ("jobs", "work_mode", "TEXT DEFAULT 'unspecified'"),
+    ("jobs", "media", "TEXT DEFAULT ''"),
+    ("jobs", "media_blob_url", "TEXT DEFAULT ''"),
+    ("jobs", "media_type", "TEXT DEFAULT ''"),
 ]
 
 def init_db(path=None):
@@ -184,7 +194,25 @@ def init_db(path=None):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
     conn.commit()
     backfill_classification(conn)
+    backfill_work_mode(conn)
     return conn
+
+def backfill_work_mode(conn):
+    """Fill jobs.work_mode for rows ingested before the field existed
+    (v9/N3). Only upgrades 'unspecified'/empty rows whose stored signals
+    derive to a concrete mode — idempotent, safe on every boot."""
+    from .job_sources import derive_work_mode
+    changed = 0
+    for r in conn.execute("SELECT id,remote,location,title,description,work_mode FROM jobs").fetchall():
+        if r["work_mode"] and r["work_mode"] != "unspecified":
+            continue
+        mode = derive_work_mode(dict(r))
+        if mode != "unspecified":
+            conn.execute("UPDATE jobs SET work_mode=? WHERE id=?", (mode, r["id"]))
+            changed += 1
+    if changed:
+        conn.commit()
+    return changed
 
 def backfill_classification(conn):
     """(Re)classify every job whose stored classification doesn't match its
