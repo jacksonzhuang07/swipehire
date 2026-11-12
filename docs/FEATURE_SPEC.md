@@ -77,17 +77,44 @@ Definitions used in this spec:
 | D3 | Work mode | **Distinguish hybrid vs in-person when available.** |
 | D4 | Candidates swiping recruiters | **Candidates swipe jobs and recruiters, and can filter between jobs and/or recruiters.** |
 
+### Model clarification — Jackson, Nov 12, 2026, 13:47 EST
+
+The model has exactly **2 sides**:
+
+1. **Candidate side** — one candidate profile per account.
+2. **Recruiter side** — each recruiter account has **at most one recruiter
+   profile**, plus any number of job postings under it. There is no
+   multi-profile concept; the invariant is one employer profile per
+   account (enforced by the schema: `employers.user_id` is the profile).
+
+Like counts are Tinder-style and attach **per entity**:
+
+- **Candidate profile** → received-like count = recruiter (job-context)
+  right-swipes received on that candidate.
+- **Each job posting** → received-like count = candidate right-swipes on
+  that job (shown in the employer's job list/selector).
+- **Recruiter profile** → received-like count = candidate right-swipes on
+  the recruiter card (N4 recruiter swiping), shown on the employer
+  dashboard / recruiter profile.
+
+Candidates can therefore like two employer-side entity types — a job
+posting or the recruiter profile — and each like lands on that entity's
+count. Identities still surface only via Matches.
+
 ## New build requirements from the amendments
 
 | # | Requirement | Covers |
 |---|-------------|--------|
 | N1 | Video upload + playback (candidate profile, recruiter profile, job profiles); image-or-video mandatory before an employer profile is complete or a job is published | C5, E7, E8 |
-| N2 | Like counts: candidate sees total recruiter right-swipes received; employer sees per-job candidate right-swipe counts (identities still revealed via Matches) | C14, E4 |
+| N2 | Like counts, per entity (see Model clarification): candidate profile = recruiter right-swipes received; each job posting = candidate right-swipes on that job; recruiter profile = candidate right-swipes on the recruiter card (identities still revealed via Matches) | C14, E4 |
 | N3 | `work_mode` field on jobs (remote / hybrid / in_person / unspecified), derived at ingest and at posting from available source signals | C12 |
-| N4 | Recruiter cards in the candidate deck + Jobs / Recruiters / Both toggle. Right-swiping a recruiter = interest in that employer; a Match forms when the recruiter right-swipes that candidate for any of their jobs | C13, C15 |
+| N4 | Recruiter cards in the candidate deck + Jobs / Recruiters / Both toggle. Right-swiping a recruiter = interest in that employer (counted on the recruiter profile's like count); a Match forms when the recruiter right-swipes that candidate for any of their jobs | C13, C15 |
 | N5 | Hard deck filters for candidates: keyword, location, work mode | C10, C11, C12 |
 
 Build order note: N3 + N5 together (filters need the field), N4 next
 (new deck type), N1 (media pipeline), N2 (counts are cheap, can ship
 anytime). Every item ships with tests; the full feature test at the end
 runs this whole checklist against production.
+
+**Status: N1–N5 BUILT Nov 12, 2026** (commits af04c78, 137c6cf, e9ed5c7 +
+tests/test_features_v9.py, 21 tests; full suite green incl. layout).
