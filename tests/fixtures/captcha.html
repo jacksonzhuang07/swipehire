@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply — Fixture form with CAPTCHA + unknown question</title></head>
+<body>
+<h1>Operations Analyst — FixtureCo</h1>
+<p>Local test fixture: this page MUST be parked as needs_human and must
+   never be submitted by the driver.</p>
+<form id="application" action="#" method="post">
+  <p><label>First Name <input type="text" name="first_name" required></label></p>
+  <p><label>Email <input type="email" name="email" required></label></p>
+  <p><label>Are you authorized to work in Canada? <input type="text" name="work_auth" required></label></p>
+  <p>Please complete the captcha below to prove you are human:</p>
+  <div class="g-recaptcha" data-sitekey="fixture-test-key"></div>
+  <button type="submit">Submit application</button>
+</form>
+<div id="done" hidden><h2>Thank you for applying. Your application has been received.</h2></div>
+<script>
+document.getElementById('application').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var n = parseInt(localStorage.getItem('fixtureCaptchaSubmits') || '0', 10) + 1;
+  localStorage.setItem('fixtureCaptchaSubmits', String(n));
+  window.__submitted = true;
+  e.target.hidden = true;
+  document.getElementById('done').hidden = false;
+});
+</script>
+</body>
+</html>

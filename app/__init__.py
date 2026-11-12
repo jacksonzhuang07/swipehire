@@ -151,7 +151,7 @@ def create_app(db_path=None, testing=False):
 
     @app.route("/api/health")
     def health():
-        return jsonify({"ok": True, "app": "SwipeHire", "version": 5})
+        return jsonify({"ok": True, "app": "SwipeHire", "version": 6})
 
     @app.route("/uploads/<path:filename>")
     @login_required()
@@ -445,17 +445,41 @@ def create_app(db_path=None, testing=False):
         u = _ext_user()
         if not u:
             return jsonify({"error": "invalid or revoked extension token"}), 401
+        # Queue eligibility (v6): everything the extension can drive —
+        # login-required jobs queued for it (queued_extension /
+        # extension_required) PLUS prepared no-login ATS-form jobs, for
+        # which the extension acts as the form executor. 'external' jobs
+        # (unknown structure) are never queued.
         rows = db().execute(
             "SELECT a.*, j.title, j.company, j.url, j.source, j.apply_type FROM applications a JOIN jobs j ON j.id=a.job_id "
-            "WHERE a.candidate_id=? AND (a.status='queued_extension' OR a.method='extension_required') ORDER BY a.id",
+            "WHERE a.candidate_id=? AND (a.status='queued_extension' "
+            "OR (a.status='prepared' AND (a.method='extension_required' OR j.apply_type='ats_form'))) ORDER BY a.id",
             (u["candidate_id"],)).fetchall()
+        cand = db().execute("SELECT * FROM candidates WHERE id=?", (u["candidate_id"],)).fetchone()
+        cand = row_to_dict(cand) if cand else {}
         out = []
         for r in rows:
             d = row_to_dict(r)
+            answers = dict(d.get("answers") or {})
+            # Enrich with structured facts derived live from the stored
+            # profile (facts only — nothing is invented here either).
+            full = answers.get("full_name") or cand.get("name") or ""
+            if full and "first_name" not in answers:
+                parts = full.strip().split()
+                answers["first_name"] = parts[0]
+                if len(parts) > 1:
+                    answers["last_name"] = " ".join(parts[1:])
+            if "salary_expectation" not in answers and cand.get("min_salary"):
+                answers["salary_expectation"] = str(cand["min_salary"])
+            if "years_of_experience" not in answers:
+                master = cand.get("master_profile") or {}
+                yrs = master.get("years_exp") or cand.get("years_exp")
+                if yrs:
+                    answers["years_of_experience"] = ("%g" % float(yrs))
             out.append({"application_id": d["id"], "status": d["status"], "method": d["method"],
                         "job_title": d["title"], "company": d["company"], "job_url": d["url"],
                         "source": d["source"], "apply_type": d["apply_type"],
-                        "answers": d.get("answers") or {}, "tailored_resume": d.get("tailored_resume") or ""})
+                        "answers": answers, "tailored_resume": d.get("tailored_resume") or ""})
         return jsonify({"queue": out})
 
     @app.route("/api/ext/report", methods=["POST"])
@@ -468,20 +492,35 @@ def create_app(db_path=None, testing=False):
             return jsonify({"error": "invalid or revoked extension token"}), 401
         d = request.get_json(force=True, silent=True) or {}
         event = (d.get("event") or "").strip().lower()
-        if event not in ("opened", "filled", "submitted", "failed"):
-            return jsonify({"error": "event must be opened|filled|submitted|failed"}), 400
+        if event not in ("opened", "filling", "filled", "submitted", "failed", "needs_human"):
+            return jsonify({"error": "event must be opened|filling|filled|submitted|failed|needs_human"}), 400
         r = db().execute("SELECT * FROM applications WHERE id=? AND candidate_id=?", (d.get("application_id"), u["candidate_id"])).fetchone()
         if not r:
             return jsonify({"error": "application not found"}), 404
         app_row = row_to_dict(r)
-        note = (d.get("note") or "").strip()[:300]
+        note = (d.get("note") or "").strip()[:500]
         if event == "submitted":
             db().execute("UPDATE applications SET status='submitted', updated_at=datetime('now'), proof=? WHERE id=?",
                          (f"Submitted — confirmed by the SwipeHire extension working in your own logged-in browser.{(' Note: ' + note) if note else ''}", app_row["id"]))
+        elif event == "needs_human":
+            # The autonomous driver parked this job: CAPTCHA, login wall,
+            # security checkpoint, or a required question with no stored
+            # answer. The reason goes to needs_review AND the proof text.
+            needs = list(app_row.get("needs_review") or [])
+            reason = note or "Extension needs a human (no reason given)."
+            if reason not in needs:
+                needs.append(reason)
+            db().execute("UPDATE applications SET status='needs_human', needs_review=?, updated_at=datetime('now'), proof=? WHERE id=?",
+                         (json.dumps(needs), f"{app_row.get('proof','')} [Extension parked this — needs you: {reason}]", app_row["id"]))
         elif event == "failed":
             db().execute("UPDATE applications SET status='needs_review', updated_at=datetime('now'), proof=? WHERE id=?",
                          (f"{app_row.get('proof','')} [Extension reported it could not apply{(': ' + note) if note else ''} — needs your review.]", app_row["id"]))
-        else:  # opened / filled: progress only, status unchanged
+        elif event == "opened":
+            # Claiming a prepared job promotes it into the extension queue.
+            new_status = "queued_extension" if app_row["status"] == "prepared" else app_row["status"]
+            db().execute("UPDATE applications SET status=?, updated_at=datetime('now'), proof=? WHERE id=?",
+                         (new_status, f"{app_row.get('proof','')} [Extension: opened.]", app_row["id"]))
+        else:  # filling / filled: progress only, status unchanged
             db().execute("UPDATE applications SET updated_at=datetime('now'), proof=? WHERE id=?",
                          (f"{app_row.get('proof','')} [Extension: {event}.]", app_row["id"]))
         db().commit()

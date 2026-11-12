@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply — Fixture Greenhouse-style ATS form</title></head>
+<body>
+<h1>Software Developer — FixtureCo</h1>
+<p>Application form (local test fixture styled on Greenhouse).</p>
+<form id="application" action="#" method="post">
+  <p><label>First Name <input type="text" name="first_name" required></label></p>
+  <p><label>Last Name <input type="text" name="last_name" required></label></p>
+  <p><label>Email <input type="email" name="email" required></label></p>
+  <p><label>Phone <input type="tel" name="phone" required></label></p>
+  <p><label>Resume <input type="file" name="resume" required></label></p>
+  <p><label>How many years of experience do you have? <input type="text" name="years" required></label></p>
+  <p><label>What is your salary expectation? <input type="text" name="salary"></label></p>
+  <p><label><input type="checkbox" name="certify" required> I certify that the information provided is accurate and I agree to the privacy policy.</label></p>
+  <button type="submit">Submit application</button>
+</form>
+<div id="done" hidden>
+  <h2>Thank you for applying. Your application has been received.</h2>
+  <p>We will be in touch soon.</p>
+</div>
+<script>
+document.getElementById('application').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var data = {};
+  new FormData(e.target).forEach(function (v, k) { data[k] = (v && v.name) ? v.name : v; });
+  var f = e.target.querySelector('input[type=file]');
+  data.resume_file = (f && f.files && f.files[0]) ? f.files[0].name : '';
+  localStorage.setItem('fixtureSubmit', JSON.stringify(data));
+  window.__submitted = data;
+  e.target.hidden = true;
+  document.getElementById('done').hidden = false;
+});
+</script>
+</body>
+</html>

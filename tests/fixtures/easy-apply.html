@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture LinkedIn-style Easy Apply</title></head>
+<body>
+<h1>Product Engineer — FixtureNet</h1>
+<p>Local test fixture styled on the LinkedIn Easy Apply modal flow.</p>
+<button id="easyApplyBtn">Easy Apply</button>
+
+<div class="jobs-easy-apply-content" role="dialog" id="modal" hidden>
+  <div class="step" id="step1">
+    <h3>Contact info</h3>
+    <p><label>Email address <input type="email" name="email" required></label></p>
+    <p><label>Phone number <input type="tel" name="phone" required></label></p>
+    <footer><button id="toStep2">Next</button></footer>
+  </div>
+  <div class="step" id="step2" hidden>
+    <h3>Resume</h3>
+    <p><label>Upload resume <input type="file" name="resume" required></label></p>
+    <footer><button id="backTo1">Back</button> <button id="toStep3">Review</button></footer>
+  </div>
+  <div class="step" id="step3" hidden>
+    <h3>Review your application</h3>
+    <p>Your contact info and resume are attached. Submit when ready.</p>
+    <footer><button id="submitApp">Submit application</button></footer>
+  </div>
+  <div class="step" id="stepDone" hidden>
+    <h3>Application sent</h3>
+    <p>You've applied to Product Engineer at FixtureNet.</p>
+    <footer><button id="doneBtn">Done</button></footer>
+  </div>
+</div>
+<script>
+function show(id) {
+  ['step1','step2','step3','stepDone'].forEach(function (s) {
+    document.getElementById(s).hidden = (s !== id);
+  });
+}
+document.getElementById('easyApplyBtn').addEventListener('click', function () {
+  document.getElementById('modal').hidden = false;
+  show('step1');
+});
+document.getElementById('toStep2').addEventListener('click', function () { show('step2'); });
+document.getElementById('backTo1').addEventListener('click', function () { show('step1'); });
+document.getElementById('toStep3').addEventListener('click', function () { show('step3'); });
+document.getElementById('submitApp').addEventListener('click', function () {
+  localStorage.setItem('fixtureEasyApplySubmitted', '1');
+  window.__submitted = true;
+  show('stepDone');
+});
+document.getElementById('doneBtn').addEventListener('click', function () {
+  document.getElementById('modal').hidden = true;
+});
+</script>
+</body>
+</html>

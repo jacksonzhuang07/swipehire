@@ -274,6 +274,7 @@ footer { text-align: center; color: var(--faint); padding: 26px 16px 34px; font-
 .status-pill.st-queued_extension { background: #efe6ff; color: #5b2ea6; }
 .status-pill.st-submitted { background: #e2f7e9; color: #0a7d4f; }
 .status-pill.st-needs_review { background: #ffe0e7; color: #c9184a; }
+.status-pill.st-needs_human { background: #ffe8cc; color: #9a5b00; }
 .lock-badge { display: inline-block; background: #14142b; color: #fff; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
 .card.legal { max-width: 760px; }
 .card.legal h3 { margin: 18px 0 6px; }

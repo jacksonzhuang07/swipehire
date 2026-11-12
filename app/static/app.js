@@ -124,13 +124,14 @@ async function swipeCurrent(dir) {
 function statusLabel(a) {
   if (a.status === 'submitted') return 'Submitted';
   if (a.status === 'queued_extension') return 'Queued for extension';
+  if (a.status === 'needs_human') return 'Needs you';
   if (a.status === 'needs_review') return 'Needs review';
   if (a.method === 'extension_required') return 'Needs extension';
   return 'Prepared';
 }
 function statusPill(a) { return `<span class="status-pill st-${esc(a.status)}${a.method === 'extension_required' ? ' st-extreq' : ''}">${esc(statusLabel(a))}</span>`; }
 function showExtModal(j) {
-  openModal(`<div class="ext-modal"><h3>🔒 This one needs your login</h3><p><b>${esc(j.title)}</b> @ ${esc(j.company)} is on a job network / portal (${esc(j.source)}) that applies through <b>your</b> account — LinkedIn, Indeed, or a Workday-style portal.</p><p>Your application package is saved as <b>Prepared — Needs extension</b>, with your tailored resume ready. The free SwipeHire browser extension applies in <b>your own logged-in browser</b> — we never see or store your job-board passwords.</p><div class="ext-btns"><a href="/extension/download"><button>⬇ Install the SwipeHire extension</button></a><button onclick="closeModal();showView('connections')">Set it up on Connections</button><button class="pass" onclick="closeModal()">Later — keep it prepared</button></div></div>`);
+  openModal(`<div class="ext-modal"><h3>🔒 This one needs your login</h3><p><b>${esc(j.title)}</b> @ ${esc(j.company)} is on a job network / portal (${esc(j.source)}) that applies through <b>your</b> account — LinkedIn, Indeed, or a Workday-style portal.</p><p>Your application package is saved as <b>Prepared — Needs extension</b>, with your tailored resume ready. The free SwipeHire browser extension applies <b>autonomously</b> in <b>your own logged-in browser</b> — it fills and submits for you, and only parks a job for you when a site throws a CAPTCHA, a login wall, or a question your profile can't answer. We never see or store your job-board passwords.</p><div class="ext-btns"><a href="/extension/download"><button>⬇ Install the SwipeHire extension</button></a><button onclick="closeModal();showView('connections')">Set it up on Connections</button><button class="pass" onclick="closeModal()">Later — keep it prepared</button></div></div>`);
 }
 
 // ---------- match overlay ----------
@@ -291,7 +292,7 @@ async function loadConnections() {
   <div class="card conn-tier"><h3>Tier 0 — No-account jobs <span class="status-pill st-submitted">Active</span></h3>
    <p>Greenhouse, Lever, Ashby, Workable and plain company application forms need <b>no account at all</b>. Right-swipes to these jobs are prepared for the form executor — tailored resume + answers from your stored facts. Nothing to set up, and the browser extension is never involved in these.</p></div>
   <div class="card conn-tier" id="extension-setup"><h3>Tier 1 — Browser extension <span class="meta">(only for 🔒 login-required jobs)</span></h3>
-   <p>For LinkedIn / Indeed / Workday-style jobs, the free SwipeHire extension applies in <b>your own browser, using the sessions you are already logged into</b> — SwipeHire never sees or stores those passwords. It autofills from your application package; you make the final submit click, and the result syncs back.</p>
+   <p>For LinkedIn / Indeed / Workday-style jobs, the free SwipeHire extension applies <b>autonomously</b> in <b>your own browser, using the sessions you are already logged into</b> — SwipeHire never sees or stores those passwords. It claims your queued jobs one at a time, fills the forms from your application package, and <b>makes the final submit click itself</b>, pacing itself like a human (≥90s between submissions, per-board daily caps). The exception path is <b>Needs you</b>: a CAPTCHA, a login wall / security checkpoint, or a required question your stored facts can't answer parks the job in your tracker — the extension never tries to defeat those.</p>
    <p>${extState}</p>
    <div class="ext-btns"><a href="/extension/download"><button>⬇ Download extension (.zip)</button></a><button onclick="genPairingToken()">Generate pairing token</button>${ext.has_token ? '<button class="pass" onclick="revokePairingToken()">Revoke token</button>' : ''}</div>
    <div id="pairing-token" class="token-box hidden"></div>

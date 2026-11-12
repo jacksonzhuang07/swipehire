@@ -1,13 +1,27 @@
 import json
 from .scoring import score_job
 SCORE_GATE = 10  # below this, application is flagged needs_review instead of submitted
+def _first(c):
+    parts = (c.get("name") or "").strip().split()
+    return parts[0] if parts else ""
+
+def _last(c):
+    parts = (c.get("name") or "").strip().split()
+    return " ".join(parts[1:]) if len(parts) > 1 else ""
+
 KNOWN_QUESTIONS = {
     "full_name": lambda c: c.get("name") or "",
+    "first_name": _first,
+    "last_name": _last,
     "email": lambda c: c.get("email") or "",
     "phone": lambda c: c.get("phone") or "",
     "years_of_experience": lambda c: str(c.get("years_exp") or ""),
     "current_title": lambda c: c.get("title") or "",
     "skills": lambda c: ", ".join(c.get("skills") or []),
+    # The user's stored minimum-salary preference is the only salary fact
+    # we hold; it is offered as the salary-expectation answer, never a
+    # number invented per job.
+    "salary_expectation": lambda c: str(c.get("min_salary") or ""),
 }
 UNKNOWN_QUESTIONS = ["Are you legally authorized to work in the job's country?", "What is your salary expectation?", "Are you willing to relocate?"]
 

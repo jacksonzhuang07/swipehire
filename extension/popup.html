@@ -4,35 +4,55 @@
 <meta charset="utf-8">
 <title>SwipeHire</title>
 <style>
-  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; width: 330px; margin: 0; padding: 14px; color: #111; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; width: 350px; margin: 0; padding: 14px; color: #111; }
   h1 { font-size: 16px; margin: 0 0 4px; }
+  h2 { font-size: 13px; margin: 14px 0 4px; }
   p.hint { color: #656e7b; font-size: 12px; margin: 4px 0 10px; }
   label { display: block; font-size: 12px; font-weight: 600; margin: 10px 0 4px; }
-  input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #d4d9de; border-radius: 8px; }
+  input[type="text"], input[type="password"] { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #d4d9de; border-radius: 8px; }
   button { background: linear-gradient(45deg, #fd267a, #ff7854); color: #fff; border: 0; border-radius: 999px; padding: 8px 14px; font-weight: 700; cursor: pointer; }
   button.secondary { background: #eef0f2; color: #111; }
-  .row { display: flex; gap: 8px; margin-top: 10px; }
+  button.danger { background: #c9184a; }
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
   .job { border: 1px solid #e6e8eb; border-radius: 10px; padding: 9px 10px; margin-top: 8px; cursor: pointer; }
   .job:hover { border-color: #fd267a; }
   .job b { font-size: 13px; }
   .job span { display: block; color: #656e7b; font-size: 12px; }
   #status { font-size: 12px; color: #0a7d4f; min-height: 16px; margin-top: 8px; }
   #status.err { color: #c9184a; }
+  .auto-box { background: #fff5f8; border: 1px solid #ffd3e0; border-radius: 12px; padding: 10px 12px; margin-top: 12px; }
+  .auto-box .state { font-weight: 800; }
+  .counters { font-size: 12px; color: #444; margin-top: 6px; line-height: 1.5; }
+  #runlog { font-size: 11px; color: #555; max-height: 150px; overflow-y: auto; margin: 6px 0 0; padding-left: 16px; }
+  #runlog li { margin-bottom: 3px; }
+  .switch { display: flex; gap: 8px; align-items: center; font-size: 13px; font-weight: 700; }
+  .switch input { width: 18px; height: 18px; }
 </style>
 </head>
 <body>
   <h1>💘 SwipeHire</h1>
-  <p class="hint">Assisted apply for login-required jobs. Pair once with the token from SwipeHire → Connections.</p>
+  <p class="hint">Autonomous apply: pair once, and the extension claims your queued jobs and applies for you — in your own logged-in browser. Pairing token comes from SwipeHire → Connections.</p>
   <label>SwipeHire address (API base)</label>
-  <input id="apiBase" placeholder="https://swipehire-jade.vercel.app">
+  <input id="apiBase" type="text" placeholder="https://swipehire-jade.vercel.app">
   <label>Pairing token</label>
   <input id="token" type="password" placeholder="shx_…">
   <div class="row">
     <button id="save">Save pairing</button>
     <button id="load" class="secondary">Load my queue</button>
   </div>
+  <div class="auto-box">
+    <label class="switch"><input type="checkbox" id="autoToggle"> Autonomous apply <span class="state" id="autoState"></span></label>
+    <div class="row">
+      <button id="pauseBtn" class="danger">⏸ Pause</button>
+      <button id="kick" class="secondary">Run queue now</button>
+    </div>
+    <div class="counters" id="counters"></div>
+    <p class="hint">Pacing: ≥90s between submissions · max 5 per 30 min · daily caps — LinkedIn 30, Indeed 20, ATS 40. CAPTCHAs, login walls and unanswerable questions are parked as “Needs you”, never defeated.</p>
+  </div>
   <div id="status"></div>
   <div id="queue"></div>
+  <h2>Run log (last 50)</h2>
+  <ul id="runlog"></ul>
   <script src="popup.js"></script>
 </body>
 </html>

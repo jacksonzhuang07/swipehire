@@ -1,7 +1,9 @@
-// SwipeHire extension popup: pairing + queue.
-// The queue/claim/report API is deliberately small and stateless so a
-// future autonomous queue processor can drive the same flow:
-// claim (GET /api/ext/queue) -> open -> report(opened|filled|submitted|failed).
+// SwipeHire extension popup (v6): pairing + AUTONOMOUS apply controls.
+// Pair once; the background queue processor (background.js) then claims
+// queued applications one at a time and applies — filling AND submitting —
+// in this browser. Here you can pause/resume, see today's counters
+// against the per-board caps, read the run log, or open a queued job
+// manually (the driver still runs autonomously on that tab).
 const $ = (id) => document.getElementById(id);
 
 function setStatus(msg, err) {
@@ -40,26 +42,47 @@ async function loadQueue() {
   }
   const items = (r.json && r.json.queue) || [];
   if (!items.length) {
-    setStatus("Queue is empty. Right-swipe a 🔒 login-required job in SwipeHire and it lands here.");
+    setStatus("Queue is empty. Right-swipe jobs in SwipeHire and they land here for the extension.");
     return;
   }
-  setStatus(items.length + " job(s) waiting.");
+  setStatus(items.length + " job(s) in the extension queue.");
   for (const item of items) {
     const div = document.createElement("div");
     div.className = "job";
     const b = document.createElement("b");
     b.textContent = item.job_title;
     const s = document.createElement("span");
-    s.textContent = item.company + " · " + item.source + (item.status === "queued_extension" ? " · queued" : " · needs extension");
+    s.textContent = item.company + " · " + item.source + " · " + item.status.replace(/_/g, " ") + " — click to open now (driver applies)";
     div.appendChild(b);
     div.appendChild(s);
     div.addEventListener("click", async () => {
       await chrome.storage.local.set({ currentJob: item });
-      await report(item.application_id, "opened");
+      await report(item.application_id, "opened", "Opened manually from the extension popup; the autonomous driver takes it from here.");
       chrome.tabs.create({ url: item.job_url });
     });
     box.appendChild(div);
   }
+}
+
+async function refreshState() {
+  let st = null;
+  try { st = await chrome.runtime.sendMessage({ type: "sh-getstate" }); } catch (e) { /* SW asleep */ }
+  if (!st) return;
+  $("autoToggle").checked = !!st.autoEnabled && !st.autoPaused;
+  $("autoState").textContent = st.autoPaused ? "— PAUSED" : st.autoEnabled ? (st.busy ? "— running (application " + st.currentAppId + ")" : "— ON") : "— OFF";
+  $("pauseBtn").textContent = st.autoPaused ? "▶ Resume" : "⏸ Pause";
+  const d = st.daily || {};
+  $("counters").innerHTML =
+    "Today: LinkedIn <b>" + (d.linkedin || 0) + "/" + st.caps.linkedin + "</b> · Indeed <b>" + (d.indeed || 0) + "/" + st.caps.indeed + "</b> · ATS <b>" + (d.ats || 0) + "/" + st.caps.ats + "</b>" +
+    "<br>Last 30 min: <b>" + st.subsLast30Min + "/5</b> submissions" +
+    (st.nextAllowedAt && st.nextAllowedAt > Date.now() ? "<br>Next submission allowed at " + new Date(st.nextAllowedAt).toLocaleTimeString() : "");
+  const ul = $("runlog");
+  ul.innerHTML = "";
+  (st.runLog || []).slice().reverse().forEach((e) => {
+    const li = document.createElement("li");
+    li.textContent = new Date(e.t).toLocaleTimeString() + " — " + e.msg;
+    ul.appendChild(li);
+  });
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -69,11 +92,32 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("save").addEventListener("click", async () => {
     await chrome.storage.local.set({
       apiBase: $("apiBase").value.trim() || "https://swipehire-jade.vercel.app",
-      token: $("token").value.trim()
+      token: $("token").value.trim(),
+      autoEnabled: true, autoPaused: false
     });
-    setStatus("Pairing saved.");
-    loadQueue();
+    setStatus("Pairing saved. Autonomous apply is ON — the queue processor will start claiming jobs.");
+    try { await chrome.runtime.sendMessage({ type: "sh-setauto", enabled: true, paused: false }); } catch (e) {}
+    try { await chrome.runtime.sendMessage({ type: "sh-kick" }); } catch (e) {}
+    loadQueue(); refreshState();
   });
   $("load").addEventListener("click", loadQueue);
-  if (c.token) loadQueue();
+  $("autoToggle").addEventListener("change", async () => {
+    const on = $("autoToggle").checked;
+    try { await chrome.runtime.sendMessage({ type: "sh-setauto", enabled: on, paused: false }); } catch (e) {}
+    refreshState();
+  });
+  $("pauseBtn").addEventListener("click", async () => {
+    let st = null;
+    try { st = await chrome.runtime.sendMessage({ type: "sh-getstate" }); } catch (e) {}
+    const resume = st && st.autoPaused;
+    try { await chrome.runtime.sendMessage({ type: "sh-setauto", paused: !resume, enabled: true }); } catch (e) {}
+    refreshState();
+  });
+  $("kick").addEventListener("click", async () => {
+    try { await chrome.runtime.sendMessage({ type: "sh-kick" }); } catch (e) {}
+    setStatus("Queue processor kicked.");
+    setTimeout(refreshState, 600);
+  });
+  if (c.token) { loadQueue(); }
+  refreshState();
 });

@@ -200,7 +200,7 @@ def test_privacy_terms_pages(client):
     assert b"never store" in client.get("/privacy").data.lower()
 
 def test_health_version_5(client):
-    assert client.get("/api/health").json["version"] == 5
+    assert client.get("/api/health").json["version"] == 6
 
 # ---------- Turso wrapper (offline, real libsql local file) ----------
 def test_turso_conn_crud_and_init(monkeypatch, tmp_path):
