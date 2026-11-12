@@ -194,4 +194,10 @@ def rank_candidates_for_job(employer, job, candidates, right_cands=(), left_cand
                      "why": why[:3], "is_stretch": False})
         out.append(item)
     out.sort(key=lambda x: -x["feed_score"])
+    # Phase 2: an active Candidate Pro Boost ranks ahead (ordering only —
+    # it buys deck position, never match eligibility). The private flag is
+    # stripped here and never reaches the employer payload.
+    out.sort(key=lambda x: 0 if x.get("_boost_active") else 1)
+    for x in out:
+        x.pop("_boost_active", None)
     return out

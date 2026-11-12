@@ -14,6 +14,7 @@ from .seed_data import seed_all
 from .documents import parse_document_facts, rebuild_master, DOC_TYPES
 from .feed import rank_jobs, rank_candidates_for_job
 from . import storage
+from . import billing
 
 PHOTO_EXTS = {".png", ".jpg", ".jpeg"}
 VIDEO_EXTS = {".mp4", ".webm", ".mov"}
@@ -143,6 +144,9 @@ def create_app(db_path=None, testing=False):
         c["video_url"] = storage.display_url(c.get("video"))
         c.pop("resume_text", None)
         c.pop("compiled_resume", None)
+        # Phase 2: boost state is the candidate's own business — it orders
+        # employer decks but is never labelled to employers as paid.
+        c.pop("boost_until", None)
         return c
 
     def employer_media(e):
@@ -377,6 +381,13 @@ def create_app(db_path=None, testing=False):
                 cand["likes_count"] = db().execute(
                     "SELECT COUNT(*) c FROM employer_swipes WHERE candidate_id=? AND direction='right'",
                     (cand["id"],)).fetchone()["c"]
+                # Phase 2: Candidate Pro lives on the USER row; boost state
+                # is candidate-only (public_candidate stripped it above, so
+                # re-attach it here for the owner).
+                cand["plan"] = u.get("plan") or "free"
+                raw = row_to_dict(r)
+                cand["boost_until"] = raw.get("boost_until")
+                cand["boost_active"] = billing.is_future(raw.get("boost_until"))
             payload["candidate"] = cand
         if u.get("employer_id"):
             r = db().execute("SELECT * FROM employers WHERE id=?", (u["employer_id"],)).fetchone()
@@ -908,10 +919,17 @@ def create_app(db_path=None, testing=False):
                     continue
             j.update(score_job(c, j))
             j["media_url"], j["media_type"] = job_media_fields(j, emp_media.get(j.get("employer_id")))
+            # Phase 2: sponsorship is a payload fact, labelled on the card —
+            # never disguised as organic rank (see below).
+            j["sponsored"] = billing.is_future(j.get("sponsored_until"))
             out.append(j)
         right_jobs = [row_to_dict(r) for r in db().execute("SELECT j.* FROM jobs j JOIN swipes s ON s.job_id=j.id WHERE s.candidate_id=? AND s.direction='right'", (c["id"],)).fetchall()]
         left_jobs = [row_to_dict(r) for r in db().execute("SELECT j.* FROM jobs j JOIN swipes s ON s.job_id=j.id WHERE s.candidate_id=? AND s.direction='left'", (c["id"],)).fetchall()]
-        return jsonify(rank_jobs(c, out, right_jobs, left_jobs))
+        ranked = rank_jobs(c, out, right_jobs, left_jobs)
+        # Sponsored jobs sort ahead while active (stable: organic order is
+        # preserved inside each group, and the card says "Sponsored").
+        ranked.sort(key=lambda j: 0 if j.get("sponsored") else 1)
+        return jsonify(ranked)
 
     @app.route("/api/swipe", methods=["POST"])
     @login_required("candidate")
@@ -932,6 +950,26 @@ def create_app(db_path=None, testing=False):
         result = {"swipe": direction, "needs_extension": False}
         if direction == "right":
             fresh = row_to_dict(db().execute("SELECT * FROM candidates WHERE id=?", (c["id"],)).fetchone())
+            # Phase 2 gate: FREE candidates may queue at most
+            # FREE_QUEUE_ALLOWANCE autonomous (queued_extension) applies per
+            # day. 'prepared' applications are NEVER gated. The like itself
+            # is already recorded above; only the queue entry is refused,
+            # with a 402 the client can turn into an upgrade prompt.
+            if not billing.is_pro(g.user.get("plan")) and job.get("requires_login"):
+                from .apply_engine import extension_connected, SCORE_GATE
+                already = db().execute("SELECT id FROM applications WHERE candidate_id=? AND job_id=?", (c["id"], job["id"])).fetchone()
+                if not already and extension_connected(db(), g.user["id"]) and score_job(fresh, job)["score"] >= SCORE_GATE:
+                    used = db().execute(
+                        "SELECT COUNT(*) c FROM applications WHERE candidate_id=? AND status='queued_extension' AND date(created_at)=date('now')",
+                        (c["id"],)).fetchone()["c"]
+                    if used >= billing.FREE_QUEUE_ALLOWANCE:
+                        m = maybe_create_match(db(), c["id"], job["id"])
+                        payload = {"error": "queue_allowance_exhausted", "plan": "candidate_pro",
+                                   "price": billing.CANDIDATE_PRO_PRICE, "allowance": billing.FREE_QUEUE_ALLOWANCE,
+                                   "swipe": "right"}
+                        if m:
+                            payload["match"] = m
+                        return jsonify(payload), 402
             app_obj, created = apply_for_job(db(), fresh, job)
             result["application"] = app_obj
             result["created"] = created
@@ -1018,6 +1056,128 @@ def create_app(db_path=None, testing=False):
         n = db().execute("SELECT COUNT(*) c FROM employer_swipes WHERE candidate_id=? AND direction='right'",
                          (c["id"],)).fetchone()["c"]
         return jsonify({"likes": n, "likes_count": n})
+
+    # ---------- Phase 2: billing, gates, sponsored, boost ----------
+    @app.route("/api/billing/plans")
+    def billing_plans():
+        """Public plan catalog — the ONLY source of prices for the UI."""
+        return jsonify({"plans": billing.PLAN_CATALOG,
+                        "payments_configured": billing.payments_configured(),
+                        "sponsored_alacarte": {"price": billing.SPONSORED_ALACARTE_PRICE, "days": billing.SPONSORED_DAYS},
+                        "free_queue_allowance": billing.FREE_QUEUE_ALLOWANCE})
+
+    @app.route("/api/billing/checkout", methods=["POST"])
+    @login_required()
+    def billing_checkout():
+        """Honest seam: NO Stripe account exists yet (Jackson's identity/
+        banking step), so checkout is 503 — never a fake checkout, and
+        nobody is marked Pro without a payment."""
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
+        plan = billing.plan_by_key(d.get("plan"))
+        if not plan:
+            return jsonify({"error": "unknown plan"}), 400
+        if not billing.payments_configured():
+            return jsonify({"error": "payments_not_configured",
+                            "message": "Payments are launching soon — join the waitlist and we'll email you."}), 503
+        return jsonify({"error": "checkout_not_implemented",
+                        "message": "Payment keys are configured but the checkout integration is not built yet."}), 501
+
+    @app.route("/api/billing/interest", methods=["POST"])
+    @login_required()
+    def billing_interest():
+        """Waitlist seam while payments are unconfigured."""
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
+        plan = billing.plan_by_key(d.get("plan"))
+        if not plan:
+            return jsonify({"error": "unknown plan"}), 400
+        db().execute("INSERT OR IGNORE INTO billing_interest(email,role,plan) VALUES(?,?,?)",
+                     (g.user["email"], g.user["role"], plan["key"]))
+        db().commit()
+        return jsonify({"recorded": True, "plan": plan["key"]}), 201
+
+    @app.route("/api/me/likers")
+    @login_required("candidate")
+    def my_likers():
+        """WHO right-swiped this candidate (recruiter + job). The COUNT is
+        free (v9/N2); the IDENTITIES are the Candidate Pro reveal."""
+        if not billing.is_pro(g.user.get("plan")):
+            return jsonify(billing.pro_required_payload("candidate_pro")), 402
+        c = my_candidate()
+        rows = db().execute(
+            "SELECT es.created_at AS liked_at, e.id AS employer_id, e.name, e.company, e.logo, e.video, "
+            "j.id AS job_id, j.title AS job_title FROM employer_swipes es "
+            "JOIN employers e ON e.id=es.employer_id JOIN jobs j ON j.id=es.job_id "
+            "WHERE es.candidate_id=? AND es.direction='right' ORDER BY es.id DESC", (c["id"],)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            name, kind = employer_media(d)
+            d["media_url"] = storage.display_url(name)
+            d["media_type"] = kind
+            d.pop("logo", None); d.pop("video", None)
+            out.append(d)
+        return jsonify({"likers": out})
+
+    @app.route("/api/me/boost", methods=["POST"])
+    @login_required("candidate")
+    def my_boost():
+        """Candidate Pro: 24h boost — ranks ahead in employer decks for
+        jobs the candidate fits. Labelled to the candidate only."""
+        if not billing.is_pro(g.user.get("plan")):
+            return jsonify(billing.pro_required_payload("candidate_pro")), 402
+        c = my_candidate()
+        until = billing.future_str(hours=billing.BOOST_HOURS)
+        db().execute("UPDATE candidates SET boost_until=? WHERE id=?", (until, c["id"]))
+        db().commit()
+        return jsonify({"boost_until": until, "boost_active": True})
+
+    @app.route("/api/employer/jobs/<int:jid>/likers")
+    @login_required("employer")
+    def employer_job_likers(jid):
+        """WHO right-swiped this job. Count is free (v9/N2); identities
+        are the Recruiter Pro reveal."""
+        emp = my_employer()
+        job = db().execute("SELECT * FROM jobs WHERE id=? AND employer_id=?", (jid, emp["id"])).fetchone()
+        if not job:
+            return jsonify({"error": "job not found"}), 404
+        if not billing.is_pro(emp.get("plan")):
+            return jsonify(billing.pro_required_payload("recruiter_pro")), 402
+        rows = db().execute(
+            "SELECT c.* FROM swipes s JOIN candidates c ON c.id=s.candidate_id "
+            "WHERE s.job_id=? AND s.direction='right' ORDER BY s.id DESC", (jid,)).fetchall()
+        return jsonify({"likers": [public_candidate(row_to_dict(r)) for r in rows]})
+
+    @app.route("/api/employer/jobs/<int:jid>/sponsor", methods=["POST"])
+    @login_required("employer")
+    def employer_job_sponsor(jid):
+        """Recruiter Pro includes ONE active sponsored job at a time:
+        sponsoring a second job moves the sponsorship. Sponsored jobs
+        sort ahead in candidate discovery and are labelled Sponsored."""
+        emp = my_employer()
+        job = db().execute("SELECT * FROM jobs WHERE id=? AND employer_id=?", (jid, emp["id"])).fetchone()
+        if not job:
+            return jsonify({"error": "job not found"}), 404
+        if not billing.is_pro(emp.get("plan")):
+            return jsonify(billing.pro_required_payload("recruiter_pro")), 402
+        d = _json_body(required=True)
+        if d is None:
+            return jsonify({"error": "JSON object body required"}), 400
+        if d.get("active"):
+            db().execute("UPDATE jobs SET sponsored_until=NULL WHERE employer_id=?", (emp["id"],))
+            until = billing.future_str(days=billing.SPONSORED_DAYS)
+            db().execute("UPDATE jobs SET sponsored_until=? WHERE id=?", (until, jid))
+        else:
+            until = None
+            db().execute("UPDATE jobs SET sponsored_until=NULL WHERE id=?", (jid,))
+        db().commit()
+        out = row_to_dict(db().execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
+        out["sponsored"] = billing.is_future(out.get("sponsored_until"))
+        out["media_url"], out["media_type"] = job_media_fields(out, employer_media(emp))
+        return jsonify(out)
 
     @app.route("/api/applications")
     @login_required("candidate")
@@ -1112,6 +1272,7 @@ def create_app(db_path=None, testing=False):
                 job = row_to_dict(db().execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone())
             job["media_url"], job["media_type"] = job_media_fields(job, employer_media(emp))
             job["likes_count"] = 0
+            job["sponsored"] = False
             return jsonify(job), 201
         rows = db().execute("SELECT * FROM jobs WHERE employer_id=? ORDER BY id DESC", (emp["id"],)).fetchall()
         emp_m = employer_media(emp)
@@ -1122,6 +1283,7 @@ def create_app(db_path=None, testing=False):
             j["likes_count"] = db().execute(
                 "SELECT COUNT(*) c FROM swipes WHERE job_id=? AND direction='right'", (j["id"],)).fetchone()["c"]
             j["media_url"], j["media_type"] = job_media_fields(j, emp_m)
+            j["sponsored"] = billing.is_future(j.get("sponsored_until"))
             out.append(j)
         return jsonify(out)
 
@@ -1162,7 +1324,12 @@ def create_app(db_path=None, testing=False):
             return jsonify({"error": "job not found for this employer"}), 404
         job = row_to_dict(job_r)
         rows = db().execute("SELECT * FROM candidates WHERE id NOT IN (SELECT candidate_id FROM employer_swipes WHERE employer_id=? AND job_id=?)", (emp["id"], job_id)).fetchall()
+        boost = {r["id"]: r["boost_until"] for r in rows}
         cands = [public_candidate(row_to_dict(r)) for r in rows]
+        # Phase 2: private ranking-only boost flag (stripped by the ranker;
+        # employers never see boost state in the payload).
+        for cdict in cands:
+            cdict["_boost_active"] = billing.is_future(boost.get(cdict["id"]))
         right_ids = [r["candidate_id"] for r in db().execute("SELECT candidate_id FROM employer_swipes WHERE employer_id=? AND direction='right'", (emp["id"],)).fetchall()]
         left_ids = [r["candidate_id"] for r in db().execute("SELECT candidate_id FROM employer_swipes WHERE employer_id=? AND direction='left'", (emp["id"],)).fetchall()]
         by_id = {c["id"]: c for c in [public_candidate(row_to_dict(r)) for r in db().execute("SELECT * FROM candidates").fetchall()]}
