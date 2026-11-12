@@ -292,6 +292,11 @@ footer { text-align: center; color: var(--faint); padding: 26px 16px 34px; font-
   header { padding: 8px 14px; }
   .logo { font-size: 21px; }
   #user-box > span:not(.avatar) { display: none; }
+  /* Phase 2: the header gained a Pricing button (+ PRO badge) — compact
+     the mobile header so the row never overflows a 390px viewport. */
+  #user-box { gap: 6px; }
+  #user-box button { padding: 6px 9px; font-size: 12px; }
+  #user-box > span.pro-badge { display: inline-block; font-size: 10px; padding: 2px 7px; }
   main { padding: 8px 10px 96px; }
   #main-nav {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 45; margin: 0;
