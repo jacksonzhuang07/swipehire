@@ -89,6 +89,16 @@ function boot(user) {
     : `<button data-view="employer" onclick="showView('employer')"><span class="nav-ic">🔥</span><span>Employer</span></button><button data-view="matches" onclick="showView('matches')"><span class="nav-ic">💬</span><span>Matches</span></button>`;
   $('main-nav').innerHTML = nav;
   showView(user.role === 'candidate' ? 'discovery' : 'employer');
+  // Stripe Checkout returns to /?checkout=success|cancelled — land on
+  // Pricing with a one-shot note (Pro itself flips via the webhook).
+  const co = new URLSearchParams(location.search).get('checkout');
+  if (co === 'success' || co === 'cancelled') {
+    CHECKOUT_MSG = co === 'success'
+      ? '✓ Payment complete — Pro activates as soon as Stripe confirms it (usually seconds). If your plan still shows Free, give it a moment and reopen Pricing.'
+      : 'Checkout cancelled — no charge was made.';
+    history.replaceState(null, '', location.pathname);
+    showView('pricing');
+  }
 }
 function showView(v) {
   document.querySelectorAll('.view').forEach(e => e.classList.add('hidden'));
@@ -425,20 +435,23 @@ async function deleteAccount() {
 // ---------- matches ----------
 /* ---------- Phase 2: pricing, reveals, sponsored, boost ---------- */
 let EMP_JOBS = [];
+let CHECKOUT_MSG = ''; // one-shot flash set by the Stripe return landing (boot)
 async function renderPricing() {
   const data = await apiJ('/api/billing/plans');
   if (!data) { $('pricing-plans').innerHTML = '<p>Could not load plans.</p>'; return; }
   const mine = ME ? (ME.role === 'candidate' ? 'candidate_pro' : 'recruiter_pro') : null;
   const isPro = key => (key === 'candidate_pro' && ME && ME.candidate && ME.candidate.plan === 'pro') || (key === 'recruiter_pro' && ME && ME.employer && ME.employer.plan === 'pro');
   $('pricing-plans').innerHTML = data.plans.map(p => `<div class="card plan-card${p.key === mine ? ' mine' : ''}"><h3>${esc(p.name)} ${isPro(p.key) ? '<span class="pro-badge">💎 Current plan</span>' : ''}</h3><p class="plan-price">$${p.price}<span>/${esc(p.period)}</span></p><p>${esc(p.tagline)}</p><ul>${p.features.map(f => `<li>${esc(f)}</li>`).join('')}</ul>${isPro(p.key) ? '' : `<button onclick="startCheckout('${p.key}')">Upgrade — $${p.price}/${esc(p.period)}</button>`}</div>`).join('');
-  $('pricing-note').innerHTML = data.payments_configured ? '' : '<p class="hint">Payments are launching soon — upgrade buttons join the waitlist for now. No card is charged.</p>';
+  const flash = CHECKOUT_MSG ? `<div class="card"><p>${esc(CHECKOUT_MSG)}</p></div>` : '';
+  CHECKOUT_MSG = '';
+  $('pricing-note').innerHTML = flash + (data.payments_configured ? '' : '<p class="hint">Payments are launching soon — upgrade buttons join the waitlist for now. No card is charged.</p>');
 }
 async function startCheckout(key) {
   if (!ME) { alert('Log in first, then upgrade.'); return; }
   const r = await POST('/api/billing/checkout', { plan: key });
   if (r.status === 503 && r.json && r.json.error === 'payments_not_configured') {
     $('pricing-note').innerHTML = `<div class="card"><p>💳 Payments are launching soon.</p><p class="hint">${esc(r.json.message || '')}</p><button onclick="joinWaitlist('${key}')">Join the waitlist</button></div>`;
-  } else if (r.json && r.json.checkout_url) { location.href = r.json.checkout_url; }
+  } else if (r.json && (r.json.url || r.json.checkout_url)) { location.href = r.json.url || r.json.checkout_url; }
   else alert((r.json && (r.json.message || r.json.error)) || 'Checkout unavailable right now.');
 }
 async function joinWaitlist(key) {
