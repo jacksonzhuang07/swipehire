@@ -1069,9 +1069,15 @@ def create_app(db_path=None, testing=False):
     @app.route("/api/billing/checkout", methods=["POST"])
     @login_required()
     def billing_checkout():
-        """Honest seam: NO Stripe account exists yet (Jackson's identity/
-        banking step), so checkout is 503 — never a fake checkout, and
-        nobody is marked Pro without a payment."""
+        """Start a Stripe Checkout for the caller's own plan.
+
+        Honest seam preserved: while STRIPE_SECRET_KEY is unset this is
+        the same 503 as Phase 2 and the UI falls back to the waitlist —
+        never a fake checkout. Once keys exist, a REAL Checkout Session
+        is created (inline price_data; no pre-created Stripe products)
+        and its URL returned; paying grants NOTHING by itself — Pro
+        flips only when the signed webhook lands (see billing_webhook).
+        """
         d = _json_body(required=True)
         if d is None:
             return jsonify({"error": "JSON object body required"}), 400
@@ -1081,8 +1087,90 @@ def create_app(db_path=None, testing=False):
         if not billing.payments_configured():
             return jsonify({"error": "payments_not_configured",
                             "message": "Payments are launching soon — join the waitlist and we'll email you."}), 503
-        return jsonify({"error": "checkout_not_implemented",
-                        "message": "Payment keys are configured but the checkout integration is not built yet."}), 501
+        if plan["audience"] != g.user["role"]:
+            return jsonify({"error": "plan_audience_mismatch",
+                            "message": f"{plan['name']} is for {plan['audience']} accounts."}), 400
+        if plan["audience"] == "candidate":
+            identity = {"user_id": g.user["id"]}
+            client_reference_id = f"user:{g.user['id']}"
+        else:
+            emp = my_employer()
+            if not emp:
+                return jsonify({"error": "no employer profile"}), 400
+            identity = {"employer_id": emp["id"]}
+            client_reference_id = f"employer:{emp['id']}"
+        metadata = dict(identity, plan=plan["key"])
+        base = request.host_url.rstrip("/")
+        success_url = f"{base}/?checkout=success&plan={plan['key']}"
+        cancel_url = f"{base}/?checkout=cancelled&plan={plan['key']}"
+        try:
+            sess = billing.create_checkout_session(
+                plan, success_url=success_url, cancel_url=cancel_url,
+                client_reference_id=client_reference_id, metadata=metadata,
+                customer_email=g.user["email"])
+        except billing.StripeAPIError as e:
+            return jsonify({"error": "stripe_error",
+                            "message": f"Stripe could not start checkout (HTTP {e.status}): {e.detail}"}), 502
+        url = sess.get("url")
+        if not url:
+            return jsonify({"error": "stripe_error",
+                            "message": "Stripe returned no checkout URL."}), 502
+        return jsonify({"url": url, "checkout_url": url, "session_id": sess.get("id")})
+
+    @app.route("/api/billing/webhook", methods=["POST"])
+    def billing_webhook():
+        """Stripe webhook — the ONLY code path that grants or revokes
+        Pro. Authenticated by the Stripe-Signature HMAC, never by a
+        session: a bad or stale signature is a 400 with zero state
+        change. Handled events:
+          checkout.session.completed  → grant Pro to the identity in the
+            session metadata and store the Stripe customer/subscription
+            ids for later lifecycle lookups.
+          customer.subscription.deleted → revoke Pro (resolved from the
+            subscription metadata, falling back to the stored Stripe
+            ids on the account row).
+        Everything else is a 200 no-op so Stripe stops retrying.
+        """
+        raw = request.get_data(cache=True)
+        if not billing.verify_webhook_signature(raw, request.headers.get("Stripe-Signature")):
+            return jsonify({"error": "invalid_signature"}), 400
+        try:
+            event = json.loads(raw.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return jsonify({"error": "invalid_payload"}), 400
+        etype = event.get("type")
+        obj = (event.get("data") or {}).get("object") or {}
+        conn = db()
+        if etype == "checkout.session.completed":
+            table, ident = billing.identity_from_metadata(obj.get("metadata"))
+            if table is None:
+                table, ident = billing.parse_client_reference_id(obj.get("client_reference_id"))
+            if table is not None:
+                conn.execute(
+                    f"UPDATE {table} SET plan='pro', plan_started_at=?, "
+                    "stripe_customer_id=?, stripe_subscription_id=? WHERE id=?",
+                    (billing.now_str(), obj.get("customer"), obj.get("subscription"), ident))
+                conn.commit()
+        elif etype == "customer.subscription.deleted":
+            table, ident = billing.identity_from_metadata(obj.get("metadata"))
+            if table is None and obj.get("id"):
+                for t in ("users", "employers"):
+                    r = conn.execute(f"SELECT id FROM {t} WHERE stripe_subscription_id=?",
+                                     (obj["id"],)).fetchone()
+                    if r:
+                        table, ident = t, r["id"]
+                        break
+            if table is None and obj.get("customer"):
+                for t in ("users", "employers"):
+                    r = conn.execute(f"SELECT id FROM {t} WHERE stripe_customer_id=?",
+                                     (obj["customer"],)).fetchone()
+                    if r:
+                        table, ident = t, r["id"]
+                        break
+            if table is not None:
+                conn.execute(f"UPDATE {table} SET plan='free' WHERE id=?", (ident,))
+                conn.commit()
+        return jsonify({"received": True})
 
     @app.route("/api/billing/interest", methods=["POST"])
     @login_required()

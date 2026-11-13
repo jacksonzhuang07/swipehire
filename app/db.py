@@ -140,9 +140,9 @@ def get_conn(path=None):
     return conn
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'candidate',name TEXT DEFAULT '',candidate_id INTEGER,employer_id INTEGER,is_demo INTEGER DEFAULT 0,plan TEXT DEFAULT 'free',plan_started_at TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'candidate',name TEXT DEFAULT '',candidate_id INTEGER,employer_id INTEGER,is_demo INTEGER DEFAULT 0,plan TEXT DEFAULT 'free',plan_started_at TEXT,stripe_customer_id TEXT,stripe_subscription_id TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS candidates(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,email TEXT,phone TEXT,title TEXT,skills TEXT DEFAULT '[]',years_exp REAL DEFAULT 0,summary TEXT,resume_text TEXT,is_demo INTEGER DEFAULT 0,target_titles TEXT DEFAULT '[]',locations TEXT DEFAULT '[]',remote_only INTEGER DEFAULT 0,min_salary INTEGER DEFAULT 0,user_id INTEGER,photo TEXT DEFAULT '',photo_blob_url TEXT DEFAULT '',video TEXT DEFAULT '',video_blob_url TEXT DEFAULT '',master_profile TEXT DEFAULT '{}',compiled_resume TEXT DEFAULT '',boost_until TEXT,created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS employers(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,company TEXT NOT NULL,email TEXT,user_id INTEGER,logo TEXT DEFAULT '',logo_blob_url TEXT DEFAULT '',video TEXT DEFAULT '',video_blob_url TEXT DEFAULT '',plan TEXT DEFAULT 'free',plan_started_at TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS employers(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,company TEXT NOT NULL,email TEXT,user_id INTEGER,logo TEXT DEFAULT '',logo_blob_url TEXT DEFAULT '',video TEXT DEFAULT '',video_blob_url TEXT DEFAULT '',plan TEXT DEFAULT 'free',plan_started_at TEXT,stripe_customer_id TEXT,stripe_subscription_id TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,external_id TEXT NOT NULL,title TEXT NOT NULL,company TEXT NOT NULL,location TEXT DEFAULT '',remote INTEGER DEFAULT 0,work_mode TEXT DEFAULT 'unspecified',media TEXT DEFAULT '',media_blob_url TEXT DEFAULT '',media_type TEXT DEFAULT '',salary_min INTEGER,salary_max INTEGER,salary_text TEXT DEFAULT '',description TEXT DEFAULT '',url TEXT DEFAULT '',source TEXT NOT NULL,tags TEXT DEFAULT '[]',employer_id INTEGER,posted_at TEXT DEFAULT '',apply_type TEXT DEFAULT 'external',requires_login INTEGER DEFAULT 0,sponsored_until TEXT,created_at TEXT DEFAULT (datetime('now')),UNIQUE(source,external_id));
 CREATE TABLE IF NOT EXISTS billing_interest(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL,role TEXT DEFAULT '',plan TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(email,plan));
 CREATE TABLE IF NOT EXISTS recruiter_swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,employer_id INTEGER NOT NULL,direction TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,employer_id));
@@ -192,6 +192,13 @@ _MIGRATIONS = [
     ("employers", "plan_started_at", "TEXT"),
     ("candidates", "boost_until", "TEXT"),
     ("jobs", "sponsored_until", "TEXT"),
+    # Phase A (Stripe): customer/subscription linkage the webhook uses
+    # to grant and revoke Pro. Same guarded-ALTER pattern as everything
+    # above — a duplicate here must never crash boot (AGENTS.md lesson).
+    ("users", "stripe_customer_id", "TEXT"),
+    ("users", "stripe_subscription_id", "TEXT"),
+    ("employers", "stripe_customer_id", "TEXT"),
+    ("employers", "stripe_subscription_id", "TEXT"),
 ]
 
 def init_db(path=None):
