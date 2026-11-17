@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Multi-step application (3 pages)</title></head><body>
+<h1>Software Developer — FixtureCo</h1>
+<div class="step" id="s1">
+  <p><label>First Name <input type="text" name="first_name" required></label></p>
+  <p><label>Last Name <input type="text" name="last_name" required></label></p>
+  <button id="c1">Continue</button>
+</div>
+<div class="step" id="s2" hidden>
+  <p><label>Email <input type="email" name="email" required></label></p>
+  <p><label>Phone <input type="tel" name="phone" required></label></p>
+  <button id="c2">Continue</button>
+</div>
+<div class="step" id="s3" hidden>
+  <p><label>Resume <input type="file" name="resume" required></label></p>
+  <p><label>How many years of experience do you have? <input type="text" name="years" required></label></p>
+  <button id="sub">Submit application</button>
+</div>
+<div id="done" hidden><h2>Thank you for applying. Your application has been received.</h2></div>
+<script>
+function show(id) { ['s1','s2','s3'].forEach(function (s) { document.getElementById(s).hidden = (s !== id); }); }
+document.getElementById('c1').addEventListener('click', function () { show('s2'); });
+document.getElementById('c2').addEventListener('click', function () { show('s3'); });
+document.getElementById('sub').addEventListener('click', function () {
+  var f = document.querySelector('input[type=file]');
+  if (!f.files || !f.files.length) { alert('resume required'); return; }
+  localStorage.setItem('gauntletSubmit:multistep-3page', '1'); window.__submitted = true;
+  ['s1','s2','s3'].forEach(function (s) { document.getElementById(s).hidden = true; });
+  document.getElementById('done').hidden = false;
+});
+</script></body></html>

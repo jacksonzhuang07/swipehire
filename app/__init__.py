@@ -800,8 +800,13 @@ def create_app(db_path=None, testing=False):
             reason = note or "Extension needs a human (no reason given)."
             if reason not in needs:
                 needs.append(reason)
-            db().execute("UPDATE applications SET status='needs_human', ext_state='parked', needs_review=?, updated_at=datetime('now'), proof=? WHERE id=?",
-                         (json.dumps(needs), f"{app_row.get('proof','')} [Extension parked this — needs you: {reason}]", app_row["id"]))
+            park_report = d.get("report") if isinstance(d.get("report"), dict) else None
+            if park_report is not None:
+                db().execute("UPDATE applications SET status='needs_human', ext_state='parked', needs_review=?, dry_run_report=?, updated_at=datetime('now'), proof=? WHERE id=?",
+                             (json.dumps(needs), json.dumps(park_report)[:20000], f"{app_row.get('proof','')} [Extension parked this — needs you: {reason}]", app_row["id"]))
+            else:
+                db().execute("UPDATE applications SET status='needs_human', ext_state='parked', needs_review=?, updated_at=datetime('now'), proof=? WHERE id=?",
+                             (json.dumps(needs), f"{app_row.get('proof','')} [Extension parked this — needs you: {reason}]", app_row["id"]))
             _record_health(board, "parked")
         elif event == "failed":
             db().execute("UPDATE applications SET status='needs_review', ext_state='parked', updated_at=datetime('now'), proof=? WHERE id=?",

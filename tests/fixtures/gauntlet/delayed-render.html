@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Delayed-render application</title></head><body>
+<h1>Software Developer — FixtureCo</h1>
+<p id="loading">Loading the application form…</p>
+<div id="mount"></div>
+<script>
+setTimeout(function () {
+  document.getElementById('loading').hidden = true;
+  document.getElementById('mount').innerHTML =
+    '<form id="app" action="#" method="post">' +
+    '<p><label>First Name <input type="text" name="first_name" required></label></p>' +
+    '<p><label>Last Name <input type="text" name="last_name" required></label></p>' +
+    '<p><label>Email <input type="email" name="email" required></label></p>' +
+    '<p><label>Resume <input type="file" name="resume" required></label></p>' +
+    '<button type="submit">Submit application</button></form>' +
+    '<div id="done" hidden><h2>Thank you for applying. Your application has been received.</h2></div>';
+  document.getElementById('app').addEventListener('submit', function (e) {
+    e.preventDefault();
+    localStorage.setItem('gauntletSubmit:delayed-render', '1'); window.__submitted = true;
+    e.target.hidden = true; document.getElementById('done').hidden = false;
+  });
+}, 2000);
+</script></body></html>

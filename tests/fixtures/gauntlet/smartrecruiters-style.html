@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>SmartRecruiters-style application</title></head><body>
+<h1>Software Developer — FixtureCo (SmartRecruiters-style)</h1>
+<form id="app" action="#" method="post">
+  <p><label>First name <input type="text" name="firstName" required></label></p>
+  <p><label>Surname <input type="text" name="surname" required></label></p>
+  <p><label>Email address <input type="email" name="email" required></label></p>
+  <p><label>Phone number <input type="tel" name="phone" required></label></p>
+  <p><label>Resume <input type="file" name="resume" required></label></p>
+  <button type="submit" id="applyBtn">Apply</button>
+</form>
+<div id="done" hidden><h2>Thank you for applying. We received your application.</h2></div>
+<script>
+document.getElementById('app').addEventListener('submit', function (e) {
+  e.preventDefault();
+  localStorage.setItem('gauntletSubmit:smartrecruiters-style', '1'); window.__submitted = true;
+  e.target.hidden = true; document.getElementById('done').hidden = false;
+});
+</script></body></html>

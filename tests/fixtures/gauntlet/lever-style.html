@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Lever-style application</title></head><body>
+<h1>Software Developer — FixtureCo (Lever-style)</h1>
+<form id="app" class="application-form" action="#" method="post">
+  <div class="application-field"><div class="label">Full name</div><input type="text" name="name" required></div>
+  <div class="application-field"><div class="label">Email</div><input type="email" name="email" required></div>
+  <div class="application-field"><div class="label">Phone</div><input type="tel" name="phone" required></div>
+  <div class="application-field"><div class="label">Resume</div><input type="file" name="resume" required></div>
+  <div class="application-field"><div class="label">Additional information</div><textarea name="comments"></textarea></div>
+  <button type="submit" class="template-btn-submit">Submit application</button>
+</form>
+<div id="done" hidden><h2>Application submitted. Thank you for applying!</h2></div>
+<script>
+document.getElementById('app').addEventListener('submit', function (e) {
+  e.preventDefault();
+  localStorage.setItem('gauntletSubmit:lever-style', '1'); window.__submitted = true;
+  e.target.hidden = true; document.getElementById('done').hidden = false;
+});
+</script></body></html>

@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Native-select application</title></head><body>
+<h1>Software Developer — FixtureCo</h1>
+<form id="app" action="#" method="post">
+  <p><label>Full Name <input type="text" name="full_name" required></label></p>
+  <p><label>Email <input type="email" name="email" required></label></p>
+  <p><label>Years of experience
+    <select name="years" required>
+      <option value="">Select…</option>
+      <option value="0-1">0–1 years</option>
+      <option value="2-3">2–3 years</option>
+      <option value="4-5">4–5 years</option>
+      <option value="6+">6+ years</option>
+    </select></label></p>
+  <p><label>Location
+    <select name="location" required>
+      <option value="">Select…</option>
+      <option value="toronto">Toronto, ON</option>
+      <option value="montreal">Montreal, QC</option>
+      <option value="vancouver">Vancouver, BC</option>
+    </select></label></p>
+  <p><label>Resume <input type="file" name="resume" required></label></p>
+  <button type="submit">Submit application</button>
+</form>
+<div id="done" hidden><h2>Thank you for applying. Your application has been received.</h2></div>
+<script>
+document.getElementById('app').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var d = { years: document.querySelector('select[name=years]').value, location: document.querySelector('select[name=location]').value };
+  localStorage.setItem('gauntletSubmit:select-native', JSON.stringify(d)); window.__submitted = d;
+  e.target.hidden = true; document.getElementById('done').hidden = false;
+});
+</script></body></html>

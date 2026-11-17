@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Custom dropdown application</title></head><body>
+<h1>Software Developer — FixtureCo</h1>
+<form id="app" action="#" method="post">
+  <p><label>First Name <input type="text" name="first_name" required></label></p>
+  <p><label>Last Name <input type="text" name="last_name" required></label></p>
+  <p><label>Email <input type="email" name="email" required></label></p>
+  <div class="field">
+    <div class="label">Years of experience</div>
+    <div class="custom-select" role="combobox" aria-haspopup="listbox" id="yexp">Select…</div>
+    <div class="opts" id="yopts" hidden>
+      <div role="option" data-v="0-1">0–1 years</div>
+      <div role="option" data-v="2-3">2–3 years</div>
+      <div role="option" data-v="4-5">4–5 years</div>
+      <div role="option" data-v="6+">6+ years</div>
+    </div>
+  </div>
+  <p><label>Resume <input type="file" name="resume" required></label></p>
+  <button type="submit">Submit application</button>
+  <p id="err" style="color:red" hidden>Please choose your years of experience.</p>
+</form>
+<div id="done" hidden><h2>Thank you for applying. Your application has been received.</h2></div>
+<script>
+var chosen = '';
+var w = document.getElementById('yexp'), opts = document.getElementById('yopts');
+w.addEventListener('click', function () { opts.hidden = !opts.hidden; });
+opts.querySelectorAll('[role=option]').forEach(function (o) {
+  o.addEventListener('click', function () { chosen = o.getAttribute('data-v'); w.textContent = o.textContent; opts.hidden = true; });
+});
+document.getElementById('app').addEventListener('submit', function (e) {
+  e.preventDefault();
+  if (!chosen) { document.getElementById('err').hidden = false; return; }
+  localStorage.setItem('gauntletSubmit:custom-dropdown', chosen); window.__submitted = true;
+  e.target.hidden = true; document.getElementById('done').hidden = false;
+});
+</script></body></html>

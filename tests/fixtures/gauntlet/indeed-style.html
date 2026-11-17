@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Indeed-style apply flow</title></head><body>
+<h1>Software Developer — FixtureCo</h1>
+<button id="applyBtn">Apply now</button>
+<div id="flow" hidden>
+  <div class="step" id="istep1">
+    <h3>Contact information</h3>
+    <p><label>First name <input type="text" name="first_name" required></label></p>
+    <p><label>Last name <input type="text" name="last_name" required></label></p>
+    <p><label>Email address <input type="email" name="email" required></label></p>
+    <p><label>Phone number <input type="tel" name="phone" required></label></p>
+    <button id="icont1">Continue</button>
+  </div>
+  <div class="step" id="istep2" hidden>
+    <h3>Resume</h3>
+    <p><label>Upload resume <input type="file" name="resume" required></label></p>
+    <button id="icont2">Continue</button>
+  </div>
+  <div class="step" id="istep3" hidden>
+    <h3>Review and submit</h3>
+    <p>Review your application before submitting.</p>
+    <button id="isubmit">Submit your application</button>
+  </div>
+</div>
+<div id="done" hidden><h2>Your application has been submitted. Thank you for applying!</h2></div>
+<script>
+function show(id) { ['istep1','istep2','istep3'].forEach(function (s) { document.getElementById(s).hidden = (s !== id); }); }
+document.getElementById('applyBtn').addEventListener('click', function () { document.getElementById('flow').hidden = false; show('istep1'); });
+document.getElementById('icont1').addEventListener('click', function () { show('istep2'); });
+document.getElementById('icont2').addEventListener('click', function () { show('istep3'); });
+document.getElementById('isubmit').addEventListener('click', function () {
+  localStorage.setItem('gauntletSubmit:indeed-style', '1'); window.__submitted = true;
+  document.getElementById('flow').hidden = true; document.getElementById('done').hidden = false;
+});
+</script></body></html>

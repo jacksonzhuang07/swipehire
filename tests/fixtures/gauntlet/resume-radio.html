@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Application with existing-resume radio</title></head><body>
+<h1>Software Developer — FixtureCo</h1>
+<form id="app" action="#" method="post">
+  <p><label>First Name <input type="text" name="first_name" required></label></p>
+  <p><label>Last Name <input type="text" name="last_name" required></label></p>
+  <p><label>Email <input type="email" name="email" required></label></p>
+  <fieldset>
+    <legend>Resume</legend>
+    <label><input type="radio" name="resume_choice" value="existing" required> Use my existing resume: Ada_Lovelace_Resume.txt</label>
+    <label><input type="radio" name="resume_choice" value="new"> Upload a new resume</label>
+  </fieldset>
+  <button type="submit">Submit application</button>
+</form>
+<div id="done" hidden><h2>Thank you for applying. Your application has been received.</h2></div>
+<script>
+document.getElementById('app').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var c = (document.querySelector('input[name=resume_choice]:checked') || {}).value;
+  localStorage.setItem('gauntletSubmit:resume-radio', c || ''); window.__submitted = c;
+  e.target.hidden = true; document.getElementById('done').hidden = false;
+});
+</script></body></html>

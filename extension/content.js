@@ -337,24 +337,29 @@
   function unansweredRequired(root) {
     var missing = [];
     var radioGroups = {};
+    var radioRequired = {};
     root.querySelectorAll("input, textarea, select").forEach(function (el) {
       if (!visible(el) || el.closest("#swipehire-panel")) return;
       var type = (el.type || "").toLowerCase();
       if (["hidden", "submit", "button"].indexOf(type) !== -1) return;
       var required = el.required || el.getAttribute("aria-required") === "true";
-      if (!required) return;
       if (type === "radio") {
+        // Group ALL members: in HTML only one radio of a group usually
+        // carries `required`, but the group as a whole is required.
         var key = el.name || labelOf(el);
         radioGroups[key] = radioGroups[key] || [];
         radioGroups[key].push(el);
+        if (required) radioRequired[key] = true;
         return;
       }
+      if (!required) return;
       if (type === "checkbox") { if (!el.checked) missing.push(labelOf(el) || "required checkbox"); return; }
       if (type === "file") { if (!el.files || !el.files.length) missing.push(labelOf(el) || "resume upload"); return; }
       if (!String(el.value || "").trim()) missing.push(labelOf(el) || (el.name || "required field"));
     });
     Object.keys(radioGroups).forEach(function (key) {
       var g = radioGroups[key];
+      if (!radioRequired[key]) return;
       if (!g.some(function (el) { return el.checked; })) missing.push(groupLabel(g) || key);
     });
     return missing.filter(function (v, i, a) { return v && a.indexOf(v) === i; });
@@ -420,6 +425,16 @@
     });
     return found;
   }
+  // Tiered submit search: strong submit labels first; "Apply now" /
+  // "Apply" only as a last resort AND only when no Continue/Next button
+  // exists (they are usually ENTRY buttons that open the flow and stay
+  // visible on every later step of it).
+  function findSubmitButton(contBtn) {
+    var b = findButtonAnywhere([/submit/i, /send application/i, /complete application/i]);
+    if (b) return b;
+    if (contBtn) return null;
+    return findButtonAnywhere([/apply now/i, /^apply$/i]);
+  }
   function findButtonAnywhere(patterns, exclude) {
     var roots = allRoots();
     for (var i = 0; i < roots.length; i++) { var b = findButton(roots[i], patterns, exclude); if (b) return b; }
@@ -441,7 +456,7 @@
     for (var i = 0; i < all.length; i++) {
       if (!visible(all[i])) continue;
       var t = clean(all[i].innerText || all[i].value || "");
-      if (/submit|send application|apply now|complete application/i.test(t)) return true;
+      if (/submit|send application|complete application/i.test(t)) return true;
     }
     return false;
   }
@@ -500,18 +515,23 @@
   function scanUnanswerable(root, answers, job) {
     var missing = [];
     var radioGroups = {};
+    var radioRequired = {};
     root.querySelectorAll("input, textarea, select").forEach(function (el) {
       if (!visible(el) || el.closest("#swipehire-panel")) return;
       var type = (el.type || "").toLowerCase();
       if (["hidden", "submit", "button", "password"].indexOf(type) !== -1) return;
       var required = el.required || el.getAttribute("aria-required") === "true";
-      if (!required) return;
-      if (el.value && String(el.value).trim()) return;
       if (type === "radio") {
         var key = el.name || labelOf(el);
         (radioGroups[key] = radioGroups[key] || []).push(el);
+        if (required) radioRequired[key] = true;
         return;
       }
+      if (!required) return;
+      // NOTE: the already-filled check comes AFTER radio/checkbox/file
+      // handling — a radio's value attribute is its OPTION value, not a
+      // filled state, and must never mark the group answered.
+      if (type !== "checkbox" && type !== "file" && el.value && String(el.value).trim()) return;
       if (type === "checkbox") {
         if (!el.checked && !/agree|consent|certify|acknowledge|privacy polic|terms|i confirm/i.test(haystack(el)))
           missing.push({ label: labelOf(el) || "required checkbox", kind: "checkbox", el: el });
@@ -529,6 +549,7 @@
     });
     Object.keys(radioGroups).forEach(function (key) {
       var g = radioGroups[key];
+      if (!radioRequired[key]) return;
       if (g.some(function (el) { return el.checked; })) return;
       var gl = groupLabel(g);
       if (/resume|cv/i.test(gl) || g.some(function (el) { return /resume|\.pdf|\.txt/i.test(labelOf(el)); })) return;
@@ -709,6 +730,16 @@
   // ---------- generic / multi-step form flow (ATS + Indeed-style) ----------
   async function formFlow(job) {
     var answers = job.answers || {};
+    // Entry-button flows (Indeed-style): when NO form fields are visible
+    // yet, an "Apply now" / "Apply" button OPENS the flow — it is not a
+    // submit. Click it once and let the loop drive the real form.
+    var anyField = allRoots().some(function (r) {
+      return Array.prototype.slice.call(r.querySelectorAll("input, textarea, select")).some(visible);
+    });
+    if (!anyField) {
+      var entryBtn = findButtonAnywhere([/^apply now$/i, /^apply$/i, /start application/i]);
+      if (entryBtn) { entryBtn.click(); await sleep(1300); }
+    }
     for (var step = 0; step < 6; step++) {
       if (state.aborted) return needHuman("You stopped the extension on this page.");
       await waitForContent(step === 0 ? 6000 : 2500);
@@ -738,8 +769,9 @@
         return needHuman("Required question(s) still unanswered after filling — the driver never guesses: " + missing.slice(0, 3).join(" · "));
       }
       var sig0 = confirmationSignals(); if (sig0.textHit) return finish({ outcome: "submitted", evidence: sig0.evidence || "Confirmation detected." });
-      var submitBtn = findButtonAnywhere([/submit/i, /send application/i, /apply now/i, /complete application/i]);
-      var contBtn = submitBtn ? null : findButtonAnywhere([/^continue$/i, /^next$/i, /continue/i]);
+      var contBtn = findButtonAnywhere([/^continue$/i, /^next$/i, /continue/i]);
+      var submitBtn = findSubmitButton(contBtn);
+      if (submitBtn) contBtn = null;
       var btn = submitBtn || contBtn;
       if (!btn) return needHuman("No submit or continue button the driver recognises on this page — the site's flow may have changed.");
       var isSubmit = !!submitBtn;
