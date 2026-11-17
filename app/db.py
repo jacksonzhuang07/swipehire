@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,external_id
 CREATE TABLE IF NOT EXISTS billing_interest(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL,role TEXT DEFAULT '',plan TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(email,plan));
 CREATE TABLE IF NOT EXISTS recruiter_swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,employer_id INTEGER NOT NULL,direction TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,employer_id));
 CREATE TABLE IF NOT EXISTS swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,job_id INTEGER NOT NULL,direction TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,job_id));
-CREATE TABLE IF NOT EXISTS applications(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,job_id INTEGER NOT NULL,status TEXT NOT NULL,method TEXT NOT NULL,proof TEXT DEFAULT '',answers TEXT DEFAULT '{}',needs_review TEXT DEFAULT '[]',tailored_resume TEXT DEFAULT '',coverage TEXT DEFAULT '{}',tailored INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,job_id));
+CREATE TABLE IF NOT EXISTS applications(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,job_id INTEGER NOT NULL,status TEXT NOT NULL,method TEXT NOT NULL,proof TEXT DEFAULT '',answers TEXT DEFAULT '{}',needs_review TEXT DEFAULT '[]',tailored_resume TEXT DEFAULT '',coverage TEXT DEFAULT '{}',tailored INTEGER DEFAULT 0,dry_run_report TEXT DEFAULT '',ext_state TEXT DEFAULT '',ext_claim_expires_at TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,job_id));
 CREATE TABLE IF NOT EXISTS employer_swipes(id INTEGER PRIMARY KEY AUTOINCREMENT,employer_id INTEGER NOT NULL,job_id INTEGER NOT NULL,candidate_id INTEGER NOT NULL,direction TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(employer_id,job_id,candidate_id));
 CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,employer_id INTEGER NOT NULL,job_id INTEGER NOT NULL,created_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,job_id));
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,match_id INTEGER NOT NULL,sender TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')));
@@ -155,6 +155,9 @@ CREATE TABLE IF NOT EXISTS documents(id INTEGER PRIMARY KEY AUTOINCREMENT,candid
 CREATE TABLE IF NOT EXISTS login_codes(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL,code_hash TEXT NOT NULL,attempts INTEGER DEFAULT 0,used INTEGER DEFAULT 0,expires_at TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS connections(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,candidate_id INTEGER,board TEXT NOT NULL,identifier TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'pending_session',created_at TEXT DEFAULT (datetime('now')),UNIQUE(user_id,board));
 CREATE TABLE IF NOT EXISTS ext_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,token_hash TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),last_used_at TEXT,revoked INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS answer_bank(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id INTEGER NOT NULL,norm_key TEXT NOT NULL,question TEXT DEFAULT '',answer TEXT NOT NULL,source TEXT DEFAULT 'user',created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(candidate_id,norm_key));
+CREATE TABLE IF NOT EXISTS board_health(id INTEGER PRIMARY KEY AUTOINCREMENT,board TEXT NOT NULL,outcome TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS board_disabled(board TEXT PRIMARY KEY,reason TEXT DEFAULT '',disabled_at TEXT DEFAULT (datetime('now')));
 """
 
 # Columns added in v2 — also applied to pre-existing v1 databases.
@@ -199,6 +202,13 @@ _MIGRATIONS = [
     ("users", "stripe_subscription_id", "TEXT"),
     ("employers", "stripe_customer_id", "TEXT"),
     ("employers", "stripe_subscription_id", "TEXT"),
+    # Auto-apply hardening: dry-run reports + the server-side extension
+    # state machine (claimed -> filling -> submit_clicked -> confirmed /
+    # parked) with a claim lease, so a browser crash after the submit
+    # click can never produce a duplicate application on retry.
+    ("applications", "dry_run_report", "TEXT DEFAULT ''"),
+    ("applications", "ext_state", "TEXT DEFAULT ''"),
+    ("applications", "ext_claim_expires_at", "TEXT DEFAULT ''"),
 ]
 
 def init_db(path=None):

@@ -612,11 +612,92 @@ def create_app(db_path=None, testing=False):
                 return dict(u) if u else None
         return None
 
+    def _board_of(url, source=""):
+        """Board key for health tracking / driver selection, from job URL."""
+        u = (url or "").lower()
+        for key, frag in (("linkedin", "linkedin."), ("indeed", "indeed."),
+                          ("greenhouse", "greenhouse.io"), ("lever", "lever.co"),
+                          ("ashby", "ashbyhq.com"), ("workable", "workable.com"),
+                          ("smartrecruiters", "smartrecruiters.com"),
+                          ("workday", "myworkdayjobs.com")):
+            if frag in u:
+                return key
+        return (source or "ats").strip().lower() or "ats"
+
+    # Board driver health: decisive outcomes are submitted /
+    # submitted_unverified (driver completed) vs failed (driver could not).
+    # Parks (needs_human) are usually legitimate and do NOT count. A board
+    # whose last >=10 decisive outcomes are <30% successful is disabled:
+    # its queued jobs park as needs_human instead of burning applications.
+    HEALTH_WINDOW = 20
+    HEALTH_MIN_SAMPLES = 10
+    HEALTH_MIN_RATE = 0.30
+
+    def _record_health(board, outcome):
+        db().execute("INSERT INTO board_health(board,outcome) VALUES(?,?)", (board, outcome))
+        if outcome in ("submitted", "submitted_unverified", "failed"):
+            rows = db().execute(
+                "SELECT outcome FROM board_health WHERE board=? AND outcome IN "
+                "('submitted','submitted_unverified','failed') ORDER BY id DESC LIMIT ?",
+                (board, HEALTH_WINDOW)).fetchall()
+            if len(rows) >= HEALTH_MIN_SAMPLES:
+                ok = sum(1 for r in rows if r["outcome"] != "failed")
+                if ok / float(len(rows)) < HEALTH_MIN_RATE:
+                    db().execute(
+                        "INSERT OR IGNORE INTO board_disabled(board,reason) VALUES(?,?)",
+                        (board, f"Auto-disabled: only {ok}/{len(rows)} of the last decisive "
+                                f"outcomes on {board} completed. Re-enable from the app when the board's flow is fixed."))
+        db().commit()
+
+    def _disabled_boards():
+        return {r["board"] for r in db().execute("SELECT board FROM board_disabled").fetchall()}
+
     @app.route("/api/ext/queue")
     def ext_queue():
         u = _ext_user()
         if not u:
             return jsonify({"error": "invalid or revoked extension token"}), 401
+        # Crash recovery (no double-apply): an application whose submit
+        # click already happened (ext_state='submit_clicked') but whose
+        # claim lease has expired means the browser died mid-flight. The
+        # application may already exist on the board — NEVER re-drive it;
+        # park it for human verification instead.
+        stale = db().execute(
+            "SELECT a.id FROM applications a WHERE a.candidate_id=? AND a.ext_state='submit_clicked' "
+            "AND a.status IN ('queued_extension','prepared') "
+            "AND (a.ext_claim_expires_at='' OR a.ext_claim_expires_at < datetime('now'))",
+            (u["candidate_id"],)).fetchall()
+        for r in stale:
+            row = db().execute("SELECT * FROM applications WHERE id=?", (r["id"],)).fetchone()
+            needs = list(json.loads(row["needs_review"] or "[]"))
+            reason = ("The extension clicked Submit for this job, then the browser closed before the "
+                      "result was confirmed. The application may already exist on the board — verify "
+                      "there before applying again (duplicate protection).")
+            if reason not in needs:
+                needs.append(reason)
+            db().execute("UPDATE applications SET status='needs_human', ext_state='parked', needs_review=?, "
+                         "updated_at=datetime('now') WHERE id=?", (json.dumps(needs), r["id"]))
+        # Disabled-board drivers: park queued jobs cheaply, with the reason.
+        disabled = _disabled_boards()
+        if disabled:
+            rows = db().execute(
+                "SELECT a.id, j.url, j.source FROM applications a JOIN jobs j ON j.id=a.job_id "
+                "WHERE a.candidate_id=? AND (a.status='queued_extension' "
+                "OR (a.status='prepared' AND (a.method='extension_required' OR j.apply_type='ats_form')))",
+                (u["candidate_id"],)).fetchall()
+            for r in rows:
+                if _board_of(r["url"], r["source"]) in disabled:
+                    row = db().execute("SELECT * FROM applications WHERE id=?", (r["id"],)).fetchone()
+                    needs = list(json.loads(row["needs_review"] or "[]"))
+                    reason = (f"The {_board_of(r['url'], r['source'])} driver was auto-disabled after "
+                              "repeated failures on that board — this job was parked instead of risking "
+                              "a broken application. Needs you.")
+                    if reason not in needs:
+                        needs.append(reason)
+                    db().execute("UPDATE applications SET status='needs_human', ext_state='parked', "
+                                 "needs_review=?, updated_at=datetime('now') WHERE id=?",
+                                 (json.dumps(needs), r["id"]))
+        db().commit()
         # Queue eligibility (v6): everything the extension can drive —
         # login-required jobs queued for it (queued_extension /
         # extension_required) PLUS prepared no-login ATS-form jobs, for
@@ -625,7 +706,14 @@ def create_app(db_path=None, testing=False):
         rows = db().execute(
             "SELECT a.*, j.title, j.company, j.url, j.source, j.apply_type FROM applications a JOIN jobs j ON j.id=a.job_id "
             "WHERE a.candidate_id=? AND (a.status='queued_extension' "
-            "OR (a.status='prepared' AND (a.method='extension_required' OR j.apply_type='ats_form'))) ORDER BY a.id",
+            "OR (a.status='prepared' AND (a.method='extension_required' OR j.apply_type='ats_form'))) "
+            # Never hand out an application whose submit was already clicked
+            # or confirmed, nor one another browser is actively driving
+            # under an unexpired claim lease.
+            "AND a.ext_state NOT IN ('submit_clicked','confirmed') "
+            "AND NOT (a.ext_state IN ('claimed','filling') AND a.ext_claim_expires_at != '' "
+            "AND a.ext_claim_expires_at >= datetime('now')) "
+            "ORDER BY a.id",
             (u["candidate_id"],)).fetchall()
         cand = db().execute("SELECT * FROM candidates WHERE id=?", (u["candidate_id"],)).fetchone()
         cand = row_to_dict(cand) if cand else {}
@@ -664,16 +752,46 @@ def create_app(db_path=None, testing=False):
             return jsonify({"error": "invalid or revoked extension token"}), 401
         d = _json_body()
         event = d.get("event").strip().lower() if isinstance(d.get("event"), str) else ""
-        if event not in ("opened", "filling", "filled", "submitted", "failed", "needs_human"):
-            return jsonify({"error": "event must be opened|filling|filled|submitted|failed|needs_human"}), 400
+        EVENTS = ("opened", "filling", "filled", "submit_clicked", "submitted",
+                  "submitted_unverified", "verified_dry_run", "failed", "needs_human")
+        if event not in EVENTS:
+            return jsonify({"error": "event must be " + "|".join(EVENTS)}), 400
         r = db().execute("SELECT * FROM applications WHERE id=? AND candidate_id=?", (_coerce_id(d.get("application_id")), u["candidate_id"])).fetchone()
         if not r:
             return jsonify({"error": "application not found"}), 404
         app_row = row_to_dict(r)
         note = d.get("note").strip()[:500] if isinstance(d.get("note"), str) else ""
+        job_r = db().execute("SELECT url, source FROM jobs WHERE id=?", (app_row["job_id"],)).fetchone()
+        board = _board_of(job_r["url"] if job_r else "", job_r["source"] if job_r else "")
+        cur_state = app_row.get("ext_state") or ""
         if event == "submitted":
-            db().execute("UPDATE applications SET status='submitted', updated_at=datetime('now'), proof=? WHERE id=?",
+            db().execute("UPDATE applications SET status='submitted', ext_state='confirmed', updated_at=datetime('now'), proof=? WHERE id=?",
                          (f"Submitted — confirmed by the SwipeHire extension working in your own logged-in browser.{(' Note: ' + note) if note else ''}", app_row["id"]))
+            _record_health(board, "submitted")
+        elif event == "submitted_unverified":
+            # The submit click happened but confirmation signals were weak
+            # or absent. Recorded as submitted (the click is real) but
+            # flagged unverified, and ext_state stays submit_clicked so the
+            # job is never re-driven automatically.
+            db().execute("UPDATE applications SET status='submitted_unverified', ext_state='submit_clicked', updated_at=datetime('now'), proof=? WHERE id=?",
+                         (f"Submitted (UNVERIFIED) — the extension clicked Submit but no firm confirmation appeared.{(' Note: ' + note) if note else ''}", app_row["id"]))
+            _record_health(board, "submitted_unverified")
+        elif event == "verified_dry_run":
+            # Dry-run verification: the driver filled and verified the form
+            # but NEVER submitted. Store the per-field report; the status
+            # is deliberately left untouched — a dry run must never mark
+            # an application submitted.
+            report = d.get("report") if isinstance(d.get("report"), dict) else {}
+            db().execute("UPDATE applications SET dry_run_report=?, updated_at=datetime('now'), proof=? WHERE id=?",
+                         (json.dumps(report)[:20000],
+                          f"{app_row.get('proof','')} [Extension: verified dry-run — form filled and verified, NOT submitted.]",
+                          app_row["id"]))
+            _record_health(board, "dry_run")
+        elif event == "submit_clicked":
+            # Persisted BEFORE the outcome is known: if the browser dies
+            # now, crash recovery parks this instead of re-driving it.
+            db().execute("UPDATE applications SET ext_state='submit_clicked', updated_at=datetime('now'), proof=? WHERE id=?",
+                         (f"{app_row.get('proof','')} [Extension: submit clicked.]", app_row["id"]))
         elif event == "needs_human":
             # The autonomous driver parked this job: CAPTCHA, login wall,
             # security checkpoint, or a required question with no stored
@@ -682,21 +800,99 @@ def create_app(db_path=None, testing=False):
             reason = note or "Extension needs a human (no reason given)."
             if reason not in needs:
                 needs.append(reason)
-            db().execute("UPDATE applications SET status='needs_human', needs_review=?, updated_at=datetime('now'), proof=? WHERE id=?",
+            db().execute("UPDATE applications SET status='needs_human', ext_state='parked', needs_review=?, updated_at=datetime('now'), proof=? WHERE id=?",
                          (json.dumps(needs), f"{app_row.get('proof','')} [Extension parked this — needs you: {reason}]", app_row["id"]))
+            _record_health(board, "parked")
         elif event == "failed":
-            db().execute("UPDATE applications SET status='needs_review', updated_at=datetime('now'), proof=? WHERE id=?",
+            db().execute("UPDATE applications SET status='needs_review', ext_state='parked', updated_at=datetime('now'), proof=? WHERE id=?",
                          (f"{app_row.get('proof','')} [Extension reported it could not apply{(': ' + note) if note else ''} — needs your review.]", app_row["id"]))
+            _record_health(board, "failed")
         elif event == "opened":
             # Claiming a prepared job promotes it into the extension queue.
+            # The claim takes a 15-minute lease in the state machine.
             new_status = "queued_extension" if app_row["status"] == "prepared" else app_row["status"]
-            db().execute("UPDATE applications SET status=?, updated_at=datetime('now'), proof=? WHERE id=?",
+            db().execute("UPDATE applications SET status=?, ext_state='claimed', ext_claim_expires_at=datetime('now','+15 minutes'), updated_at=datetime('now'), proof=? WHERE id=?",
                          (new_status, f"{app_row.get('proof','')} [Extension: opened.]", app_row["id"]))
         else:  # filling / filled: progress only, status unchanged
-            db().execute("UPDATE applications SET updated_at=datetime('now'), proof=? WHERE id=?",
-                         (f"{app_row.get('proof','')} [Extension: {event}.]", app_row["id"]))
+            new_state = cur_state if cur_state in ("submit_clicked", "confirmed") else "filling"
+            db().execute("UPDATE applications SET ext_state=?, updated_at=datetime('now'), proof=? WHERE id=?",
+                         (new_state, f"{app_row.get('proof','')} [Extension: {event}.]", app_row["id"]))
         db().commit()
         return jsonify(row_to_dict(db().execute("SELECT * FROM applications WHERE id=?", (app_row["id"],)).fetchone()))
+
+    @app.route("/api/ext/answer-lookup", methods=["POST"])
+    def ext_answer_lookup():
+        """Extension asks the answer bank for an answer to a form question
+        (by normalized key, fuzzy fallback) before parking. Answers come
+        only from user-supplied facts — never invented."""
+        u = _ext_user()
+        if not u:
+            return jsonify({"error": "invalid or revoked extension token"}), 401
+        from .answers import lookup_answer, normalize_question
+        d = _json_body()
+        q = d.get("question") if isinstance(d.get("question"), str) else ""
+        hit = lookup_answer(db(), u["candidate_id"], q)
+        if not hit:
+            return jsonify({"found": False, "norm_key": normalize_question(q)})
+        return jsonify({"found": True, "answer": hit["answer"], "norm_key": hit["norm_key"],
+                        "matched_question": hit["question"]})
+
+    @app.route("/api/ext/board-health")
+    def ext_board_health():
+        u = _ext_user()
+        if not u:
+            return jsonify({"error": "invalid or revoked extension token"}), 401
+        out = {}
+        for r in db().execute("SELECT DISTINCT board FROM board_health").fetchall():
+            b = r["board"]
+            rows = db().execute(
+                "SELECT outcome FROM board_health WHERE board=? AND outcome IN "
+                "('submitted','submitted_unverified','failed') ORDER BY id DESC LIMIT ?",
+                (b, HEALTH_WINDOW)).fetchall()
+            ok = sum(1 for x in rows if x["outcome"] != "failed")
+            out[b] = {"decisive": len(rows), "completed": ok,
+                      "rate": (ok / float(len(rows))) if rows else None}
+        return jsonify({"boards": out, "disabled": sorted(_disabled_boards())})
+
+    @app.route("/api/candidate/answer-bank", methods=["GET", "POST", "DELETE"])
+    @login_required("candidate")
+    def candidate_answer_bank():
+        """The user manages their reusable answer bank: answers they gave
+        once, reused by the driver for matching future questions."""
+        from .answers import bank_answer, normalize_question
+        c = my_candidate()
+        if not c:
+            return jsonify({"error": "candidate profile required"}), 400
+        if request.method == "GET":
+            rows = db().execute("SELECT * FROM answer_bank WHERE candidate_id=? ORDER BY updated_at DESC",
+                                (c["id"],)).fetchall()
+            return jsonify({"answers": [row_to_dict(r) for r in rows]})
+        if request.method == "DELETE":
+            db().execute("DELETE FROM answer_bank WHERE candidate_id=? AND id=?",
+                         (c["id"], _coerce_id(request.args.get("id"))))
+            db().commit()
+            return jsonify({"ok": True})
+        d = _json_body()
+        q = d.get("question").strip() if isinstance(d.get("question"), str) else ""
+        a = d.get("answer").strip() if isinstance(d.get("answer"), str) else ""
+        if not q or not a:
+            return jsonify({"error": "question and answer are required"}), 400
+        row = bank_answer(db(), c["id"], q, a, source="user")
+        if not row:
+            return jsonify({"error": "question could not be normalized"}), 400
+        return jsonify(row_to_dict(row)), 201
+
+    @app.route("/api/candidate/board-health/reenable", methods=["POST"])
+    @login_required("candidate")
+    def candidate_board_reenable():
+        d = _json_body()
+        board = d.get("board").strip().lower() if isinstance(d.get("board"), str) else ""
+        if not board:
+            return jsonify({"error": "board required"}), 400
+        db().execute("DELETE FROM board_disabled WHERE board=?", (board,))
+        db().execute("DELETE FROM board_health WHERE board=?", (board,))
+        db().commit()
+        return jsonify({"ok": True, "board": board, "disabled": sorted(_disabled_boards())})
 
     @app.route("/extension/download")
     def extension_download():
