@@ -71,6 +71,11 @@ async function refreshState() {
   $("autoToggle").checked = !!st.autoEnabled && !st.autoPaused;
   $("autoState").textContent = st.autoPaused ? "— PAUSED" : st.autoEnabled ? (st.busy ? "— running (application " + st.currentAppId + ")" : "— ON") : "— OFF";
   $("pauseBtn").textContent = st.autoPaused ? "▶ Resume" : "⏸ Pause";
+  $("dryRunToggle").checked = !!st.dryRun;
+  $("dryRunState").textContent = st.dryRun ? "— ON (never submits)" : "— off";
+  const halted = st.haltUntil && st.haltUntil > Date.now();
+  $("haltBox").style.display = halted ? "block" : "none";
+  if (halted) $("haltUntil").textContent = new Date(st.haltUntil).toLocaleString();
   const d = st.daily || {};
   $("counters").innerHTML =
     "Today: LinkedIn <b>" + (d.linkedin || 0) + "/" + st.caps.linkedin + "</b> · Indeed <b>" + (d.indeed || 0) + "/" + st.caps.indeed + "</b> · ATS <b>" + (d.ats || 0) + "/" + st.caps.ats + "</b>" +
@@ -111,6 +116,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     try { st = await chrome.runtime.sendMessage({ type: "sh-getstate" }); } catch (e) {}
     const resume = st && st.autoPaused;
     try { await chrome.runtime.sendMessage({ type: "sh-setauto", paused: !resume, enabled: true }); } catch (e) {}
+    refreshState();
+  });
+  $("dryRunToggle").addEventListener("change", async () => {
+    try { await chrome.runtime.sendMessage({ type: "sh-setauto", dryRun: $("dryRunToggle").checked }); } catch (e) {}
+    refreshState();
+  });
+  $("haltOverride").addEventListener("click", async () => {
+    try { await chrome.runtime.sendMessage({ type: "sh-setauto", overrideHalt: true }); } catch (e) {}
+    setStatus("Halt overridden. Autonomous apply resumed.");
     refreshState();
   });
   $("kick").addEventListener("click", async () => {

@@ -42,6 +42,12 @@
   </div>
   <div class="auto-box">
     <label class="switch"><input type="checkbox" id="autoToggle"> Autonomous apply <span class="state" id="autoState"></span></label>
+    <label class="switch"><input type="checkbox" id="dryRunToggle"> Dry-run mode <span class="state" id="dryRunState"></span></label>
+    <p class="hint">Dry-run: the driver fills and verifies each form but NEVER clicks submit, and reports a per-field verification instead.</p>
+    <div id="haltBox" style="display:none;background:#fde8ec;border:1px solid #f3b8c6;border-radius:8px;padding:8px 10px;font-size:12px;">
+      <b>⛔ Account-warning halt</b> — autonomous applying is halted until <span id="haltUntil"></span>.
+      <div class="row"><button id="haltOverride" class="danger">Override halt (I checked my account)</button></div>
+    </div>
     <div class="row">
       <button id="pauseBtn" class="danger">⏸ Pause</button>
       <button id="kick" class="secondary">Run queue now</button>

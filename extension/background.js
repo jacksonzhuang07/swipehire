@@ -9,20 +9,28 @@
 //
 // Pacing (launch defaults, shown in the popup, counters in chrome.storage
 // with day rollover):
-//   - at least 90 seconds between submissions
+//   - at least 90 seconds between submissions, plus 0-45s random jitter
 //   - rolling burst cap: 5 submissions per 30 minutes
 //   - daily caps per board: LinkedIn 30, Indeed 20, ATS 40
-// Safety: a driver result flagged as an account warning pauses ALL
-// autonomous applying until the user resumes from the popup. CAPTCHAs,
-// login walls, checkpoints and unanswerable required questions are parked
-// as needs_human by the drivers — never defeated, never retried blindly.
+// Safety: a driver result flagged as an account warning triggers a hard
+// 48-HOUR halt of all autonomous applying (resumable only after it
+// expires, or by explicit user override in the popup). CAPTCHAs, login
+// walls, checkpoints and unanswerable required questions are parked as
+// needs_human by the drivers — never defeated, never retried blindly.
+// DRY-RUN MODE (popup toggle): drivers fill + verify but never submit,
+// reporting verified_dry_run with a per-field report; dry runs never
+// touch the pacing counters (nothing was submitted).
 
 "use strict";
 
 var CAPS = { linkedin: 30, indeed: 20, ats: 40 };
 var BURST_MAX = 5, BURST_WINDOW_MS = 30 * 60 * 1000;
 var MIN_GAP_MS = 90 * 1000;
+var JITTER_MAX_MS = 45 * 1000;
+var HALT_MS = 48 * 3600 * 1000;
 var CLAIM_TIMEOUT_MS = 150 * 1000;
+
+function gapMs() { return MIN_GAP_MS + Math.floor(Math.random() * (JITTER_MAX_MS / 1000)) * 1000; }
 
 function todayKey() { return new Date().toISOString().slice(0, 10); }
 
@@ -70,13 +78,21 @@ async function api(path, opts) {
   return { status: r.status, json: j };
 }
 
-async function report(applicationId, event, note) {
-  return api("/api/ext/report", { method: "POST", body: JSON.stringify({ application_id: applicationId, event: event, note: note || "" }) });
+async function report(applicationId, event, note, extra) {
+  var body = { application_id: applicationId, event: event, note: note || "" };
+  if (extra) Object.assign(body, extra);
+  return api("/api/ext/report", { method: "POST", body: JSON.stringify(body) });
 }
 
 async function getProc() {
-  var s = await get(["proc", "autoEnabled", "autoPaused"]);
-  return { proc: s.proc || null, autoEnabled: s.autoEnabled !== false, autoPaused: !!s.autoPaused };
+  var s = await get(["proc", "autoEnabled", "autoPaused", "dryRun", "autoHaltUntil"]);
+  return { proc: s.proc || null, autoEnabled: s.autoEnabled !== false, autoPaused: !!s.autoPaused,
+           dryRun: !!s.dryRun, autoHaltUntil: s.autoHaltUntil || 0 };
+}
+
+async function haltActive() {
+  var s = await get(["autoHaltUntil"]);
+  return !!(s.autoHaltUntil && Date.now() < s.autoHaltUntil);
 }
 
 async function setProc(p) { await chrome.storage.local.set({ proc: p }); }
@@ -93,6 +109,7 @@ async function tick() {
 async function tickInner() {
   var st = await getProc();
   if (!st.autoEnabled || st.autoPaused) return;
+  if (st.autoHaltUntil && Date.now() < st.autoHaltUntil) return; // 48h account-warning halt
   var c = await cfg();
   if (!c.token) return;
   var proc = st.proc;
@@ -121,6 +138,17 @@ async function tickInner() {
     if ((pace.daily[b] || 0) < CAPS[b]) { item = queue[i]; board = b; break; }
   }
   if (!item) { await log("Daily cap reached for every board in the queue — waiting for tomorrow."); return; }
+  // Pre-flight liveness: a dead posting parks cheaply, without driving.
+  // Only a definitive 404/410 parks — network flakiness proceeds as usual.
+  try {
+    var resp = await fetch(item.job_url, { method: "GET", credentials: "include" });
+    if (resp.status === 404 || resp.status === 410) {
+      await report(item.application_id, "needs_human",
+        "Pre-flight: this posting appears to be gone (HTTP " + resp.status + ") — parked without driving the form.");
+      await log("Pre-flight parked application " + item.application_id + ": posting HTTP " + resp.status + ".");
+      return;
+    }
+  } catch (e) { /* unreachable from here is not proof of death — drive it */ }
   await claim(item, board);
 }
 
@@ -143,23 +171,36 @@ async function finishClaim(result) {
   var proc = st.proc;
   if (!proc) return;
   var appId = proc.appId, board = proc.board || "ats", tabId = proc.tabId;
-  if (result.outcome === "submitted") {
-    await report(appId, "submitted", result.evidence || "Confirmation detected by the autonomous driver.");
+  if (result.outcome === "submitted" || result.outcome === "submitted_unverified") {
+    // A submit click really happened in both cases, so both consume
+    // pacing — re-driving sooner would risk a duplicate application.
+    await report(appId, result.outcome, result.evidence || "Confirmation detected by the autonomous driver.",
+                 result.fieldReport ? { report: result.fieldReport } : null);
     var pace = await getPace();
     pace.subs.push(Date.now());
     pace.daily[board] = (pace.daily[board] || 0) + 1;
-    pace.nextAllowedAt = Date.now() + MIN_GAP_MS;
+    var gap = gapMs();
+    pace.nextAllowedAt = Date.now() + gap;
     await setPace(pace);
-    await log("Submitted: application " + appId + " (" + board + ", today " + pace.daily[board] + "/" + CAPS[board] + "). Next submission allowed in 90s.");
+    await log((result.outcome === "submitted" ? "Submitted: application " : "Submitted (unverified): application ") + appId + " (" + board + ", today " + pace.daily[board] + "/" + CAPS[board] + "). Next submission allowed in ~" + Math.round(gap / 1000) + "s.");
+  } else if (result.outcome === "verified_dry_run") {
+    // Nothing was submitted: store the per-field report, touch NOTHING
+    // in the pacing counters.
+    await report(appId, "verified_dry_run", result.evidence || "Dry run verified — submit not clicked.",
+                 result.fieldReport ? { report: result.fieldReport } : null);
+    await log("Dry run verified: application " + appId + " — form filled and verified, submit NOT clicked.");
   } else if (result.outcome === "needs_human") {
-    await report(appId, "needs_human", result.reason || "The driver needs a human on this page.");
+    await report(appId, "needs_human", result.reason || "The driver needs a human on this page.",
+                 result.fieldReport ? { report: result.fieldReport } : null);
     await log("Needs you: application " + appId + " — " + (result.reason || ""));
     if (result.accountWarning) {
-      await chrome.storage.local.set({ autoPaused: true });
-      await log("⚠ Account-warning signal detected — autonomous applying is PAUSED for all boards until you resume it in the popup.");
+      var haltUntil = Date.now() + HALT_MS;
+      await chrome.storage.local.set({ autoPaused: true, autoHaltUntil: haltUntil });
+      await log("⚠ Account-warning signal detected — autonomous applying is HALTED for 48 hours (until " + new Date(haltUntil).toLocaleString() + "). It resumes only when the halt expires or you explicitly override it in the popup.");
     }
   } else {
-    await report(appId, "failed", result.reason || "The driver could not complete this application.");
+    await report(appId, "failed", result.reason || "The driver could not complete this application.",
+                 result.fieldReport ? { report: result.fieldReport } : null);
     await log("Failed: application " + appId + " — " + (result.reason || ""));
   }
   if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) {} }
@@ -175,12 +216,25 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       var s = await get(["currentJob"]);
       var job = s.currentJob || null;
       if (st.proc && st.proc.busy && job && sender.tab && sender.tab.id === st.proc.tabId) {
-        sendResponse({ mode: "auto", job: job });
+        sendResponse({ mode: "auto", job: job, dryRun: st.dryRun });
       } else if ((!st.proc || !st.proc.busy) && job && job.job_url && sender.tab && job.job_url.split("#")[0] === (sender.tab.url || "").split("#")[0]) {
-        sendResponse({ mode: "manual", job: job });
+        sendResponse({ mode: "manual", job: job, dryRun: st.dryRun });
       } else {
         sendResponse({ mode: null, job: null });
       }
+      return;
+    }
+    if (msg.type === "sh-answer-lookup") {
+      var r = await api("/api/ext/answer-lookup", { method: "POST", body: JSON.stringify({ question: msg.question || "" }) });
+      sendResponse(r.json || { found: false });
+      return;
+    }
+    if (msg.type === "sh-submitclick") {
+      var stc = await getProc();
+      if (stc.proc && stc.proc.busy) {
+        await report(stc.proc.appId, "submit_clicked", "Driver is clicking Submit now.");
+      }
+      sendResponse({ ok: true });
       return;
     }
     if (msg.type === "sh-progress") {
@@ -205,7 +259,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       var pace = await getPace();
       var s3 = await get(["runLog"]);
       sendResponse({
-        autoEnabled: st3.autoEnabled, autoPaused: st3.autoPaused,
+        autoEnabled: st3.autoEnabled, autoPaused: st3.autoPaused, dryRun: st3.dryRun,
+        haltUntil: st3.autoHaltUntil || 0,
         busy: !!(st3.proc && st3.proc.busy), currentAppId: st3.proc ? st3.proc.appId : null,
         caps: CAPS, daily: pace.daily, subsLast30Min: pace.subs.filter(function (t) { return Date.now() - t < BURST_WINDOW_MS; }).length,
         nextAllowedAt: pace.nextAllowedAt || 0, runLog: (s3.runLog || []).slice(-50)
@@ -216,8 +271,16 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       var patch = {};
       if (typeof msg.enabled === "boolean") patch.autoEnabled = msg.enabled;
       if (typeof msg.paused === "boolean") patch.autoPaused = msg.paused;
+      if (typeof msg.dryRun === "boolean") patch.dryRun = msg.dryRun;
+      if (msg.overrideHalt === true) {
+        // Explicit user override of the 48h account-warning halt.
+        patch.autoHaltUntil = 0;
+        patch.autoPaused = false;
+        await log("48-hour account-warning halt OVERRIDDEN by user in the popup.");
+      }
       await chrome.storage.local.set(patch);
-      await log(msg.paused ? "Autonomous applying paused by user." : (msg.enabled === false ? "Autonomous applying turned OFF by user." : "Autonomous applying resumed/enabled by user."));
+      if (typeof msg.dryRun === "boolean") await log(msg.dryRun ? "Dry-run mode ON — drivers will fill and verify but NEVER submit." : "Dry-run mode OFF — drivers submit for real.");
+      else if (!msg.overrideHalt) await log(msg.paused ? "Autonomous applying paused by user." : (msg.enabled === false ? "Autonomous applying turned OFF by user." : "Autonomous applying resumed/enabled by user."));
       sendResponse({ ok: true });
       tick();
       return;
