@@ -35,10 +35,12 @@
     { re: /phone|mobile|cellular|telephone/i, keys: ["phone"] },
     { re: /first[\s_-]*name|given[\s_-]*name/i, keys: ["first_name"] },
     { re: /last[\s_-]*name|family[\s_-]*name|surname/i, keys: ["last_name"] },
-    { re: /full[\s_-]*name|your name|candidate name|applicant name|^name$/i, keys: ["full_name"] },
+    { re: /full[\s_-]*name|your name|candidate name|applicant name|legal name|^name$/i, keys: ["full_name"] },
     { re: /years? of experience|experience in years|how many years|years of .*experience/i, keys: ["years_of_experience"] },
     { re: /salary|compensation|pay expectation|expected pay/i, keys: ["salary_expectation"] },
-    { re: /current (job )?title|present (job )?title|current position/i, keys: ["current_title"] },
+    { re: /current (job )?title|present (job )?title|current position|most recent (job )?title|previous (job )?title|recent job title/i, keys: ["current_title"] },
+    { re: /current company|most recent company|current employer|present employer|company name/i, keys: ["company"] },
+    { re: /country(?! code)/i, keys: ["country"] },
     { re: /location|city|where are you located/i, keys: ["location"] },
     { re: /skills?/i, keys: ["skills"] }
   ];
@@ -216,6 +218,17 @@
         var ok;
         if (v.kind === "file") ok = !!(v.el.files && v.el.files.length);
         else if (v.kind === "check") ok = !!v.el.checked;
+        else if (v.kind === "combo") {
+          ok = !!String(v.el.value || "").trim();
+          if (!ok) {
+            var want = String(v.entry.detail || "").toLowerCase(), node = v.el, hops = 0;
+            while (!ok && node && hops < 4) {
+              node = node.parentElement; hops++;
+              if (node && (node.innerText || "").length < 400 &&
+                  (node.innerText || "").toLowerCase().indexOf(want) !== -1) ok = true;
+            }
+          }
+        }
         else ok = !!String(v.el.value || "").trim();
         if (!ok && v.entry.status === "filled") {
           v.entry.status = "missed";
@@ -232,11 +245,17 @@
              url: location.href, dry_run: !!state.dryRun };
   }
 
+  function isCombobox(el) {
+    if (el.tagName !== "INPUT") return false;
+    return el.getAttribute("role") === "combobox" || el.getAttribute("aria-haspopup") === "listbox" ||
+      el.hasAttribute("aria-autocomplete") || el.hasAttribute("aria-expanded");
+  }
   function fillFields(root, answers) {
     var filled = 0;
     var fields = root.querySelectorAll("input, textarea, select");
     fields.forEach(function (el) {
       if (!visible(el)) return;
+      if (isCombobox(el)) return; // widget: handled by fillCustomDropdowns
       var type = (el.type || "").toLowerCase();
       if (["hidden", "submit", "button", "file", "checkbox", "radio", "password"].indexOf(type) !== -1) return;
       if (el.closest("#swipehire-panel")) return;
@@ -255,7 +274,7 @@
     var n = 0;
     drv.fields.forEach(function (pair) {
       var el = root.querySelector(pair[0]);
-      if (!el || !visible(el) || (el.value && String(el.value).trim())) return;
+      if (!el || !visible(el) || isCombobox(el) || (el.value && String(el.value).trim())) return;
       var v = answers[pair[1]];
       if (!v) return;
       if (el.tagName === "SELECT") { if (fillSelect(el, v)) { n++; record(labelOf(el), "filled", v, el); } }
@@ -312,23 +331,79 @@
   }
   // Div-based custom dropdown widgets (not native <select>): click to
   // open, then click the option whose text matches the stored answer.
+  // Open a react-select-style combobox and click the matching option.
+  // Order matters: open the menu FIRST and try the unfiltered options;
+  // type to filter only if needed, and type WITHOUT the blur event
+  // setValue() dispatches — blur closes the menu before options render.
+  async function pickComboboxOption(el, v) {
+    var doc = el.ownerDocument || document;
+    function findPick() {
+      var opts = doc.querySelectorAll("[role='option'], [class*='select__option'], [role='listbox'] li, [role='listbox'] div, .dropdown-option");
+      var fake = [];
+      opts.forEach(function (o) { if (visible(o)) fake.push({ text: o.innerText || o.textContent || "", value: "", el: o }); });
+      return optionMatch(fake, v);
+    }
+    function clickPick(pick) {
+      ["mousedown", "mouseup", "click"].forEach(function (t) {
+        pick.el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+      });
+    }
+    // react-select opens on MOUSEDOWN on the control container — a bare
+    // synthetic click() on the input never opens the menu. The whole
+    // open+pick is attempted twice: on slow pages the widget may not be
+    // hydrated yet at first try.
+    for (var round = 0; round < 2; round++) {
+      var ok = await pickComboboxRound(el, v, doc, findPick, clickPick);
+      if (ok) return true;
+      await sleep(1200);
+    }
+    return false;
+  }
+  async function pickComboboxRound(el, v, doc, findPick, clickPick) {
+    try { el.focus(); } catch (e) {}
+    var control = el.closest ? (el.closest("[class*='select__control']") || el.closest("[class*='-control']")) : null;
+    var openTarget = control || el;
+    ["mousedown", "mouseup", "click"].forEach(function (t) {
+      openTarget.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+    });
+    var pick = null, i;
+    for (i = 0; i < 5 && !pick; i++) { await sleep(300); pick = findPick(); }
+    if (!pick) {
+      // Type to filter: native setter + input event ONLY (no blur/change).
+      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      if (setter && setter.set) setter.set.call(el, v); else el.value = v;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      for (i = 0; i < 8 && !pick; i++) { await sleep(300); pick = findPick(); }
+    }
+    if (!pick) return false;
+    clickPick(pick);
+    await sleep(250);
+    return true;
+  }
   async function fillCustomDropdowns(root, answers) {
     var widgets = root.querySelectorAll("[role='combobox'], [aria-haspopup='listbox'], .custom-select, [class*='dropdown-select']");
     var n = 0;
     for (var wi = 0; wi < widgets.length; wi++) {
       var w = widgets[wi];
       if (!visible(w) || w.closest("#swipehire-panel")) continue;
-      if (w.tagName === "SELECT" || w.tagName === "INPUT") continue;
+      if (w.tagName === "SELECT") continue;
       var v = answerFor(w, answers);
       if (v === undefined || v === null) continue;
       if ((w.innerText || "").indexOf(v) !== -1) continue; // already shows the answer
+      var isInput = w.tagName === "INPUT";
+      if (isInput) {
+        if (await pickComboboxOption(w, v)) { n++; record(labelOf(w), "filled", v, w, "combo"); }
+        else record(labelOf(w), "missed", "combobox: no option matched " + v);
+        continue;
+      }
       w.click();
       await sleep(350);
-      var opts = root.querySelectorAll("[role='option'], [role='listbox'] li, [role='listbox'] div, .dropdown-option, [class*='option']");
+      var doc = w.ownerDocument || document;
+      var opts = doc.querySelectorAll("[role='option'], [role='listbox'] li, [role='listbox'] div, .dropdown-option, [class*='option']");
       var fake = [];
       opts.forEach(function (o) { if (visible(o)) fake.push({ text: o.innerText || o.textContent || "", value: "", el: o }); });
       var pick = optionMatch(fake, v);
-      if (pick) { pick.el.click(); n++; record(labelOf(w), "filled", v + " (custom dropdown)"); await sleep(200); }
+      if (pick) { pick.el.click(); n++; record(labelOf(w), "filled", v, isInput ? w : undefined, isInput ? "combo" : undefined); await sleep(200); }
       else record(labelOf(w), "missed", "custom dropdown: no option matched " + v);
     }
     return n;
@@ -542,6 +617,7 @@
           missing.push({ label: labelOf(el) || "resume upload", kind: "file", el: el });
         return;
       }
+      if (!labelOf(el) && !el.name && !el.id) return; // widget backing input (e.g. react-select's hidden holder): the visible control is scanned/filled as a combobox; the post-fill check remains the guard
       var v = answerFor(el, answers);
       if (v === undefined || v === null) missing.push({ label: labelOf(el) || (el.name || "required field"), kind: el.tagName === "SELECT" ? "select" : "text", el: el });
       else if (el.tagName === "SELECT" && !optionMatch(Array.prototype.slice.call(el.options || []).filter(function (o) { return o.value; }), v))
@@ -590,9 +666,13 @@
     }
     return null;
   }
-  function fillBankAnswer(item, answer) {
+  async function fillBankAnswer(item, answer) {
     var el = item.el;
     if (!el) return false;
+    if (isCombobox(el)) {
+      if (await pickComboboxOption(el, String(answer))) { record(item.label, "filled", String(answer), el, "combo"); return true; }
+      return false;
+    }
     if (item.kind === "radio") {
       var g = item.group || [el];
       var fake = g.map(function (r) { return { text: labelOf(r), value: "", el: r }; });
@@ -619,7 +699,7 @@
     var still = [];
     for (var i = 0; i < missing.length; i++) {
       var ans = await bankLookup(missing[i].label);
-      if (ans !== null && ans !== undefined && fillBankAnswer(missing[i], ans)) continue;
+      if (ans !== null && ans !== undefined && (await fillBankAnswer(missing[i], ans))) continue;
       still.push(missing[i]);
     }
     if (!still.length) return null;
@@ -742,7 +822,7 @@
     }
     for (var step = 0; step < 6; step++) {
       if (state.aborted) return needHuman("You stopped the extension on this page.");
-      await waitForContent(step === 0 ? 6000 : 2500);
+      await waitForContent(step === 0 ? 12000 : 2500);
       var s = safety(); if (s) return needHuman(s.reason, s.accountWarning ? { accountWarning: true } : {});
       var roots = allRoots();
       // Pre-flight: park BEFORE touching the form if a required field on

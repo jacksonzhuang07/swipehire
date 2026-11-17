@@ -160,6 +160,18 @@ def main():
                                              lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=FIX_DIR, **k))
     threading.Thread(target=fixsrv.serve_forever, daemon=True).start()
     import ssl as _ssl
+    # Self-signed fixture cert (Ashby's host is HSTS-preloaded, so its
+    # fixture must be served over HTTPS). Regenerate if /tmp was cleaned.
+    if not (os.path.exists("/tmp/fixture-tls/cert.pem") and os.path.exists("/tmp/fixture-tls/key.pem")):
+        os.makedirs("/tmp/fixture-tls", exist_ok=True)
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "365",
+             "-keyout", "/tmp/fixture-tls/key.pem", "-out", "/tmp/fixture-tls/cert.pem",
+             "-subj", "/CN=jobs.ashbyhq.com",
+             "-addext", "subjectAltName=DNS:jobs.ashbyhq.com,DNS:boards.greenhouse.io,"
+                        "DNS:jobs.lever.co,DNS:apply.workable.com,DNS:jobs.smartrecruiters.com,"
+                        "DNS:www.indeed.com,DNS:www.linkedin.com,DNS:localhost"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     tls_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
     tls_ctx.load_cert_chain("/tmp/fixture-tls/cert.pem", "/tmp/fixture-tls/key.pem")
     tlssrv = http.server.ThreadingHTTPServer(("127.0.0.1", TLS_PORT),
